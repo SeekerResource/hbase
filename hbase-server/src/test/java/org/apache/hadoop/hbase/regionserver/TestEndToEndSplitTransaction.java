@@ -23,6 +23,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -33,20 +34,23 @@ import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Chore;
+import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.NotServingRegionException;
+import org.apache.hadoop.hbase.ScheduledChore;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.HTable;
-import org.apache.hadoop.hbase.client.MetaScanner;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
@@ -96,9 +100,9 @@ public class TestEndToEndSplitTransaction {
     TableName tableName =
         TableName.valueOf("TestSplit");
     byte[] familyName = Bytes.toBytes("fam");
-    HTable ht = TEST_UTIL.createTable(tableName, familyName);
-    TEST_UTIL.loadTable(ht, familyName, false);
-    ht.close();
+    try (HTable ht = TEST_UTIL.createTable(tableName, familyName)) {
+      TEST_UTIL.loadTable(ht, familyName, false);
+    }
     HRegionServer server = TEST_UTIL.getHBaseCluster().getRegionServer(0);
     byte []firstRow = Bytes.toBytes("aaa");
     byte []splitRow = Bytes.toBytes("lll");
@@ -195,8 +199,9 @@ public class TestEndToEndSplitTransaction {
     Stoppable stopper = new StoppableImplementation();
     RegionSplitter regionSplitter = new RegionSplitter(table);
     RegionChecker regionChecker = new RegionChecker(conf, stopper, TABLENAME);
+    final ChoreService choreService = new ChoreService("TEST_SERVER");
 
-    regionChecker.start();
+    choreService.scheduleChore(regionChecker);
     regionSplitter.start();
 
     //wait until the splitter is finished
@@ -204,11 +209,11 @@ public class TestEndToEndSplitTransaction {
     stopper.stop(null);
 
     if (regionChecker.ex != null) {
-      throw regionChecker.ex;
+      throw new AssertionError("regionChecker", regionChecker.ex);
     }
 
     if (regionSplitter.ex != null) {
-      throw regionSplitter.ex;
+      throw new AssertionError("regionSplitter", regionSplitter.ex);
     }
 
     //one final check
@@ -216,6 +221,7 @@ public class TestEndToEndSplitTransaction {
   }
 
   static class RegionSplitter extends Thread {
+    final Connection connection;
     Throwable ex;
     Table table;
     TableName tableName;
@@ -229,6 +235,7 @@ public class TestEndToEndSplitTransaction {
       this.family = table.getTableDescriptor().getFamiliesKeys().iterator().next();
       admin = TEST_UTIL.getHBaseAdmin();
       rs = TEST_UTIL.getMiniHBaseCluster().getRegionServer(0);
+      connection = TEST_UTIL.getConnection();
     }
 
     @Override
@@ -236,15 +243,15 @@ public class TestEndToEndSplitTransaction {
       try {
         Random random = new Random();
         for (int i= 0; i< 5; i++) {
-          NavigableMap<HRegionInfo, ServerName> regions = MetaScanner.allTableRegions(conf, null,
-              tableName);
+          List<HRegionInfo> regions =
+              MetaTableAccessor.getTableRegions(connection, tableName, true);
           if (regions.size() == 0) {
             continue;
           }
           int regionIndex = random.nextInt(regions.size());
 
           //pick a random region and split it into two
-          HRegionInfo region = Iterators.get(regions.keySet().iterator(), regionIndex);
+          HRegionInfo region = Iterators.get(regions.iterator(), regionIndex);
 
           //pick the mid split point
           int start = 0, end = Integer.MAX_VALUE;
@@ -280,41 +287,41 @@ public class TestEndToEndSplitTransaction {
     }
 
     void addData(int start) throws IOException {
+      List<Put> puts = new ArrayList<>();
       for (int i=start; i< start + 100; i++) {
         Put put = new Put(Bytes.toBytes(i));
-
         put.add(family, family, Bytes.toBytes(i));
-        table.put(put);
+        puts.add(put);
       }
-      table.flushCommits();
+      table.put(puts);
     }
   }
 
   /**
-   * Checks regions using MetaScanner, MetaTableAccessor and HTable methods
+   * Checks regions using MetaTableAccessor and HTable methods
    */
-  static class RegionChecker extends Chore {
+  static class RegionChecker extends ScheduledChore {
+    Connection connection;
     Configuration conf;
     TableName tableName;
     Throwable ex;
 
-    RegionChecker(Configuration conf, Stoppable stopper, TableName tableName) {
-      super("RegionChecker", 10, stopper);
+    RegionChecker(Configuration conf, Stoppable stopper, TableName tableName) throws IOException {
+      super("RegionChecker", stopper, 10);
       this.conf = conf;
       this.tableName = tableName;
-      this.setDaemon(true);
+
+      this.connection = ConnectionFactory.createConnection(conf);
     }
 
     /** verify region boundaries obtained from MetaScanner */
-    void verifyRegionsUsingMetaScanner() throws Exception {
+    void verifyRegionsUsingMetaTableAccessor() throws Exception {
 
-      //MetaScanner.allTableRegions()
-      NavigableMap<HRegionInfo, ServerName> regions = MetaScanner.allTableRegions(conf, null,
+      NavigableMap<HRegionInfo, ServerName> regions = MetaTableAccessor.allTableRegions(connection,
           tableName);
       verifyTableRegions(regions.keySet());
 
-      //MetaScanner.listAllRegions()
-      List<HRegionInfo> regionList = MetaScanner.listAllRegions(conf, false);
+      List<HRegionInfo> regionList = MetaTableAccessor.getAllRegions(connection, true);
       verifyTableRegions(Sets.newTreeSet(regionList));
     }
 
@@ -323,7 +330,7 @@ public class TestEndToEndSplitTransaction {
       HTable table = null;
       try {
         //HTable.getStartEndKeys()
-        table = new HTable(conf, tableName);
+        table = (HTable) connection.getTable(tableName);
         Pair<byte[][], byte[][]> keys = table.getStartEndKeys();
         verifyStartEndKeys(keys);
 
@@ -336,7 +343,7 @@ public class TestEndToEndSplitTransaction {
     }
 
     void verify() throws Exception {
-      verifyRegionsUsingMetaScanner();
+      verifyRegionsUsingMetaTableAccessor();
       verifyRegionsUsingHTable();
     }
 
@@ -425,7 +432,8 @@ public class TestEndToEndSplitTransaction {
     long start = System.currentTimeMillis();
     log("blocking until region is split:" +  Bytes.toStringBinary(regionName));
     HRegionInfo daughterA = null, daughterB = null;
-    Table metaTable = new HTable(conf, TableName.META_TABLE_NAME);
+    Connection connection = ConnectionFactory.createConnection(conf);
+    Table metaTable = connection.getTable(TableName.META_TABLE_NAME);
 
     try {
       Result result = null;
@@ -468,6 +476,7 @@ public class TestEndToEndSplitTransaction {
       }
     } finally {
       IOUtils.closeQuietly(metaTable);
+      IOUtils.closeQuietly(connection);
     }
   }
 
@@ -497,7 +506,8 @@ public class TestEndToEndSplitTransaction {
       throws IOException, InterruptedException {
     log("blocking until region is opened for reading:" + hri.getRegionNameAsString());
     long start = System.currentTimeMillis();
-    Table table = new HTable(conf, hri.getTable());
+    Connection connection = ConnectionFactory.createConnection(conf);
+    Table table = connection.getTable(hri.getTable());
 
     try {
       byte [] row = hri.getStartKey();
@@ -515,7 +525,7 @@ public class TestEndToEndSplitTransaction {
       }
     } finally {
       IOUtils.closeQuietly(table);
+      IOUtils.closeQuietly(connection);
     }
   }
 }
-

@@ -152,6 +152,26 @@ public class BaseMasterObserver implements MasterObserver {
   }
 
   @Override
+  public void preGetNamespaceDescriptor(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      String namespace) throws IOException {
+  }
+
+  @Override
+  public void postGetNamespaceDescriptor(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      NamespaceDescriptor ns) throws IOException {
+  }
+
+  @Override
+  public void preListNamespaceDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<NamespaceDescriptor> descriptors) throws IOException {
+  }
+
+  @Override
+  public void postListNamespaceDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<NamespaceDescriptor> descriptors) throws IOException {
+  }
+
+  @Override
   public void preAddColumn(ObserverContext<MasterCoprocessorEnvironment> ctx,
       TableName tableName, HColumnDescriptor column) throws IOException {
   }
@@ -411,22 +431,23 @@ public class BaseMasterObserver implements MasterObserver {
 
   @Override
   public void preGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
-      List<TableName> tableNamesList, List<HTableDescriptor> descriptors) throws IOException {
-  }
-
-  @Override
-  public void preGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
       List<TableName> tableNamesList, List<HTableDescriptor> descriptors, String regex)
       throws IOException {
   }
 
   @Override
   public void postGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
-      List<HTableDescriptor> descriptors) throws IOException {
+      List<TableName> tableNamesList, List<HTableDescriptor> descriptors,
+      String regex) throws IOException {
   }
 
   @Override
-  public void postGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+  public void preGetTableNames(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<HTableDescriptor> descriptors, String regex) throws IOException {
+  }
+
+  @Override
+  public void postGetTableNames(ObserverContext<MasterCoprocessorEnvironment> ctx,
       List<HTableDescriptor> descriptors, String regex) throws IOException {
   }
 

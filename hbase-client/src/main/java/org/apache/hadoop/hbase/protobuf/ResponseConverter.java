@@ -44,6 +44,7 @@ import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionAction;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionActionResult;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.ResultOrException;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.ScanResponse;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.NameBytesPair;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.EnableCatalogJanitorResponse;
@@ -114,17 +115,23 @@ public final class ResponseConverter {
       }
 
       for (ResultOrException roe : actionResult.getResultOrExceptionList()) {
+        Object responseValue;
         if (roe.hasException()) {
-          results.add(regionName, roe.getIndex(), ProtobufUtil.toException(roe.getException()));
+          responseValue = ProtobufUtil.toException(roe.getException());
         } else if (roe.hasResult()) {
-          results.add(regionName, roe.getIndex(), ProtobufUtil.toResult(roe.getResult(), cells));
+          responseValue = ProtobufUtil.toResult(roe.getResult(), cells);
+          // add the load stats, if we got any
+          if (roe.hasLoadStats()) {
+            ((Result) responseValue).addResults(roe.getLoadStats());
+          }
         } else if (roe.hasServiceResult()) {
-          results.add(regionName, roe.getIndex(), roe.getServiceResult());
+          responseValue = roe.getServiceResult();
         } else {
           // no result & no exception. Unexpected.
           throw new IllegalStateException("No result & no exception roe=" + roe +
               " for region " + actions.getRegion());
         }
+        results.add(regionName, roe.getIndex(), responseValue);
       }
     }
 
@@ -149,9 +156,11 @@ public final class ResponseConverter {
    * @param r
    * @return an action result builder
    */
-  public static ResultOrException.Builder buildActionResult(final ClientProtos.Result r) {
+  public static ResultOrException.Builder buildActionResult(final ClientProtos.Result r,
+      ClientProtos.RegionLoadStats stats) {
     ResultOrException.Builder builder = ResultOrException.newBuilder();
     if (r != null) builder.setResult(r);
+    if(stats != null) builder.setLoadStats(stats);
     return builder;
   }
 
@@ -292,8 +301,10 @@ public final class ResponseConverter {
    * @return A GetLastFlushedSequenceIdResponse
    */
   public static GetLastFlushedSequenceIdResponse buildGetLastFlushedSequenceIdResponse(
-      long seqId) {
-    return GetLastFlushedSequenceIdResponse.newBuilder().setLastFlushedSequenceId(seqId).build();
+      RegionStoreSequenceIds ids) {
+    return GetLastFlushedSequenceIdResponse.newBuilder()
+        .setLastFlushedSequenceId(ids.getLastFlushedSequenceId())
+        .addAllStoreLastFlushedSequenceId(ids.getStoreSequenceIdList()).build();
   }
 
   /**
@@ -331,6 +342,9 @@ public final class ResponseConverter {
         // Cells are out in cellblocks.  Group them up again as Results.  How many to read at a
         // time will be found in getCellsLength -- length here is how many Cells in the i'th Result
         int noOfCells = response.getCellsPerResult(i);
+        boolean isPartial =
+            response.getPartialFlagPerResultCount() > i ?
+                response.getPartialFlagPerResult(i) : false;
         List<Cell> cells = new ArrayList<Cell>(noOfCells);
         for (int j = 0; j < noOfCells; j++) {
           try {
@@ -353,7 +367,7 @@ public final class ResponseConverter {
           }
           cells.add(cellScanner.current());
         }
-        results[i] = Result.create(cells, null, response.getStale());
+        results[i] = Result.create(cells, null, response.getStale(), isPartial);
       } else {
         // Result is pure pb.
         results[i] = ProtobufUtil.toResult(response.getResults(i));

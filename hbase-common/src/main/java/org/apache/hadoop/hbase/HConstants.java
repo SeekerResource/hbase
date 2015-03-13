@@ -19,7 +19,6 @@ package org.apache.hadoop.hbase;
 
 import static org.apache.hadoop.hbase.io.hfile.BlockType.MAGIC_LENGTH;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Collections;
@@ -62,7 +61,7 @@ public final class HConstants {
   /**
    * The first four bytes of Hadoop RPC connections
    */
-  public static final ByteBuffer RPC_HEADER = ByteBuffer.wrap("HBas".getBytes());
+  public static final byte[] RPC_HEADER = new byte[] { 'H', 'B', 'a', 's' };
   public static final byte RPC_CURRENT_VERSION = 0;
 
   // HFileBlock constants.
@@ -206,6 +205,10 @@ public final class HConstants {
   /** Parameter name for the ZK data directory */
   public static final String ZOOKEEPER_DATA_DIR =
       ZK_CFG_PROPERTY_PREFIX + "dataDir";
+
+  /** Parameter name for the ZK tick time */
+  public static final String ZOOKEEPER_TICK_TIME =
+      ZK_CFG_PROPERTY_PREFIX + "tickTime";
 
   /** Default limit on concurrent client-side zookeeper connections */
   public static final int DEFAULT_ZOOKEPER_MAX_CLIENT_CNXNS = 300;
@@ -388,7 +391,7 @@ public final class HConstants {
 
   /**
    * The hbase:meta table's name.
-   * 
+   *
    */
   @Deprecated  // for compat from 0.94 -> 0.96.
   public static final byte[] META_TABLE_NAME = TableName.META_TABLE_NAME.getName();
@@ -450,6 +453,16 @@ public final class HConstants {
 
   /** The upper-half merge region column qualifier */
   public static final byte[] MERGEB_QUALIFIER = Bytes.toBytes("mergeB");
+
+  /** The catalog family as a string*/
+  public static final String TABLE_FAMILY_STR = "table";
+
+  /** The catalog family */
+  public static final byte [] TABLE_FAMILY = Bytes.toBytes(TABLE_FAMILY_STR);
+
+  /** The serialized table state qualifier */
+  public static final byte[] TABLE_STATE_QUALIFIER = Bytes.toBytes("state");
+
 
   /**
    * The meta table version column qualifier.
@@ -611,9 +624,9 @@ public final class HConstants {
    * Note that when a single row is larger than this limit the row is still
    * returned completely.
    *
-   * The default value is unlimited.
+   * The default value is 2MB.
    */
-  public static final long DEFAULT_HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE = Long.MAX_VALUE;
+  public static final long DEFAULT_HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE = 2 * 1024 * 1024;
 
   /**
    * Parameter name for client pause value, used mostly as value to wait
@@ -689,7 +702,7 @@ public final class HConstants {
   /**
    * Default value for {@link #HBASE_CLIENT_SCANNER_CACHING}
    */
-  public static final int DEFAULT_HBASE_CLIENT_SCANNER_CACHING = 100;
+  public static final int DEFAULT_HBASE_CLIENT_SCANNER_CACHING = Integer.MAX_VALUE;
 
   /**
    * Parameter name for number of rows that will be fetched when calling next on
@@ -738,7 +751,8 @@ public final class HConstants {
   /**
    * The client scanner timeout period in milliseconds.
    */
-  public static final String HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD = "hbase.client.scanner.timeout.period";
+  public static final String HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD =
+      "hbase.client.scanner.timeout.period";
 
   /**
    * Use {@link #HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD} instead.
@@ -867,9 +881,21 @@ public final class HConstants {
   public static final String REGION_SERVER_HANDLER_COUNT = "hbase.regionserver.handler.count";
   public static final int DEFAULT_REGION_SERVER_HANDLER_COUNT = 30;
 
-  public static final String REGION_SERVER_META_HANDLER_COUNT =
+  /*
+   * REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT:
+   * -1  => Disable aborting
+   * 0   => Abort if even a single handler has died
+   * 0.x => Abort only when this percent of handlers have died
+   * 1   => Abort only all of the handers have died
+   */
+  public static final String REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT =
+		  "hbase.regionserver.handler.abort.on.error.percent";
+  public static final double DEFAULT_REGION_SERVER_HANDLER_ABORT_ON_ERROR_PERCENT = 0.5;
+
+  //High priority handlers to deal with admin requests and system table operation requests
+  public static final String REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT =
       "hbase.regionserver.metahandler.count";
-  public static final int DEFAULT_REGION_SERVER_META_HANDLER_COUNT = 10;
+  public static final int DEFAULT_REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT = 10;
 
   public static final String REGION_SERVER_REPLICATION_HANDLER_COUNT =
       "hbase.regionserver.replication.handler.count";
@@ -881,6 +907,12 @@ public final class HConstants {
   /** Conf key that specifies timeout value to wait for a region ready */
   public static final String LOG_REPLAY_WAIT_REGION_TIMEOUT =
       "hbase.master.log.replay.wait.region.timeout";
+
+  /** Conf key for enabling meta replication */
+  public static final String USE_META_REPLICAS = "hbase.meta.replicas.use";
+  public static final boolean DEFAULT_USE_META_REPLICAS = false;
+  public static final String META_REPLICAS_NUM = "hbase.meta.replica.count";
+  public static final int DEFAULT_META_REPLICA_NUM = 1;
 
   /**
    * The name of the configuration parameter that specifies
@@ -906,6 +938,16 @@ public final class HConstants {
   public static final String ENABLE_WAL_COMPRESSION =
     "hbase.regionserver.wal.enablecompression";
 
+  /** Configuration name of WAL storage policy
+   * Valid values are:
+   *  NONE: no preference in destination of replicas
+   *  ONE_SSD: place only one replica in SSD and the remaining in default storage
+   *  and ALL_SSD: place all replica on SSD
+   *
+   * See http://hadoop.apache.org/docs/r2.6.0/hadoop-project-dist/hadoop-hdfs/ArchivalStorage.html*/
+  public static final String WAL_STORAGE_POLICY = "hbase.wal.storage.policy";
+  public static final String DEFAULT_WAL_STORAGE_POLICY = "NONE";
+
   /** Region in Transition metrics threshold time */
   public static final String METRICS_RIT_STUCK_WARNING_THRESHOLD="hbase.metrics.rit.stuck.warning.threshold";
 
@@ -915,7 +957,7 @@ public final class HConstants {
    * The byte array represents for NO_NEXT_INDEXED_KEY;
    * The actual value is irrelevant because this is always compared by reference.
    */
-  public static final byte [] NO_NEXT_INDEXED_KEY = Bytes.toBytes("NO_NEXT_INDEXED_KEY");
+  public static final Cell NO_NEXT_INDEXED_KEY = new KeyValue();
   /** delimiter used between portions of a region name */
   public static final int DELIMITER = ',';
   public static final String HBASE_CONFIG_READ_ZOOKEEPER_CONFIG =
@@ -930,9 +972,11 @@ public final class HConstants {
    */
   public static final int NORMAL_QOS = 0;
   public static final int QOS_THRESHOLD = 10;
-  public static final int HIGH_QOS = 100;
+  public static final int HIGH_QOS = 200;
   public static final int REPLICATION_QOS = 5; // normal_QOS < replication_QOS < high_QOS
   public static final int REPLAY_QOS = 6; // REPLICATION_QOS < REPLAY_QOS < high_QOS
+  public static final int ADMIN_QOS = 100; // QOS_THRESHOLD < ADMIN_QOS < high_QOS
+  public static final int SYSTEMTABLE_QOS = HIGH_QOS;
 
   /** Directory under /hbase where archived hfiles are stored */
   public static final String HFILE_ARCHIVE_DIRECTORY = "archive";
@@ -1011,6 +1055,9 @@ public final class HConstants {
 
   public static final long NO_NONCE = 0;
 
+  /** Default cipher for encryption */
+  public static final String CIPHER_AES = "AES";
+
   /** Configuration key for the crypto algorithm provider, a class name */
   public static final String CRYPTO_CIPHERPROVIDER_CONF_KEY = "hbase.crypto.cipherprovider";
 
@@ -1033,6 +1080,13 @@ public final class HConstants {
 
   /** Configuration key for the name of the master WAL encryption key for the cluster, a string */
   public static final String CRYPTO_WAL_KEY_NAME_CONF_KEY = "hbase.crypto.wal.key.name";
+
+  /** Configuration key for the algorithm used for creating jks key, a string */
+  public static final String CRYPTO_KEY_ALGORITHM_CONF_KEY = "hbase.crypto.key.algorithm";
+
+  /** Configuration key for the name of the alternate cipher algorithm for the cluster, a string */
+  public static final String CRYPTO_ALTERNATE_KEY_ALGORITHM_CONF_KEY =
+      "hbase.crypto.alternate.key.algorithm";
 
   /** Configuration key for enabling WAL encryption, a boolean */
   public static final String ENABLE_WAL_ENCRYPTION = "hbase.regionserver.wal.encryption";
@@ -1086,7 +1140,7 @@ public final class HConstants {
 
   public static final String HBASE_CLIENT_FAST_FAIL_THREASHOLD_MS =
       "hbase.client.fastfail.threshold";
-  
+
   public static final long HBASE_CLIENT_FAST_FAIL_THREASHOLD_MS_DEFAULT =
       60000;
 
@@ -1097,7 +1151,19 @@ public final class HConstants {
       600000;
 
   public static final String HBASE_CLIENT_FAST_FAIL_INTERCEPTOR_IMPL =
-      "hbase.client.fast.fail.interceptor.impl"; 
+      "hbase.client.fast.fail.interceptor.impl";
+
+  /** Config key for if the server should send backpressure and if the client should listen to
+   * that backpressure from the server */
+  public static final String ENABLE_CLIENT_BACKPRESSURE = "hbase.client.backpressure.enabled";
+  public static final boolean DEFAULT_ENABLE_CLIENT_BACKPRESSURE = false;
+
+  public static final String HEAP_OCCUPANCY_LOW_WATERMARK_KEY =
+      "hbase.heap.occupancy.low_water_mark";
+  public static final float DEFAULT_HEAP_OCCUPANCY_LOW_WATERMARK = 0.95f;
+  public static final String HEAP_OCCUPANCY_HIGH_WATERMARK_KEY =
+      "hbase.heap.occupancy.high_water_mark";
+  public static final float DEFAULT_HEAP_OCCUPANCY_HIGH_WATERMARK = 0.98f;
 
   private HConstants() {
     // Can't be instantiated with this ctor.

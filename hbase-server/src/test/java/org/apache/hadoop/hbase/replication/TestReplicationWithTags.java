@@ -39,6 +39,8 @@ import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
@@ -72,6 +74,9 @@ public class TestReplicationWithTags {
   private static Configuration conf2;
 
   private static ReplicationAdmin replicationAdmin;
+
+  private static Connection connection1;
+  private static Connection connection2;
 
   private static Table htable1;
   private static Table htable2;
@@ -137,26 +142,16 @@ public class TestReplicationWithTags {
     fam.setMaxVersions(3);
     fam.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
     table.addFamily(fam);
-    Admin admin = null;
-    try {
-      admin = new HBaseAdmin(conf1);
+    try (Connection conn = ConnectionFactory.createConnection(conf1);
+        Admin admin = conn.getAdmin()) {
       admin.createTable(table, HBaseTestingUtility.KEYS_FOR_HBA_CREATE_TABLE);
-    } finally {
-      if (admin != null) {
-        admin.close();
-      }
     }
-    try {
-      admin = new HBaseAdmin(conf2);
+    try (Connection conn = ConnectionFactory.createConnection(conf2);
+        Admin admin = conn.getAdmin()) {
       admin.createTable(table, HBaseTestingUtility.KEYS_FOR_HBA_CREATE_TABLE);
-    } finally {
-      if(admin != null){
-        admin.close();
-      }
     }
-    htable1 = new HTable(conf1, TABLE_NAME);
-    htable1.setWriteBufferSize(1024);
-    htable2 = new HTable(conf2, TABLE_NAME);
+    htable1 = utility1.getConnection().getTable(TABLE_NAME);
+    htable2 = utility2.getConnection().getTable(TABLE_NAME);
   }
 
   /**
@@ -175,7 +170,7 @@ public class TestReplicationWithTags {
     put.setAttribute("visibility", Bytes.toBytes("myTag3"));
     put.add(FAMILY, ROW, ROW);
 
-    htable1 = new HTable(conf1, TABLE_NAME);
+    htable1 = utility1.getConnection().getTable(TABLE_NAME);
     htable1.put(put);
 
     Get get = new Get(ROW);

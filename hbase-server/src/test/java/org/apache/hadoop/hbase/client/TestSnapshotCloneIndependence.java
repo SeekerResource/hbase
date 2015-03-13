@@ -18,19 +18,17 @@
 
 package org.apache.hadoop.hbase.client;
 
-import java.util.List;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
 import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.snapshot.SnapshotTestingUtils;
@@ -44,6 +42,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import java.util.List;
 
 /**
  * Test to verify that the cloned table is independent of the table from which it was cloned
@@ -173,7 +173,7 @@ public class TestSnapshotCloneIndependence {
         // Restore the interrupted status
         Thread.currentThread().interrupt();
       }
-      if (t.getRegionLocations().size() > originalCount) {
+      if (t.getAllRegionLocations().size() > originalCount) {
         return;
       }
     }
@@ -194,9 +194,7 @@ public class TestSnapshotCloneIndependence {
     final TableName localTableName =
         TableName.valueOf(STRING_TABLE_NAME + startTime);
 
-    HTable original = UTIL.createTable(localTableName, TEST_FAM);
-    try {
-
+    try (Table original = UTIL.createTable(localTableName, TEST_FAM)) {
       UTIL.loadTable(original, TEST_FAM);
       final int origTableRowCount = UTIL.countRows(original);
 
@@ -213,9 +211,7 @@ public class TestSnapshotCloneIndependence {
       TableName cloneTableName = TableName.valueOf("test-clone-" + localTableName);
       admin.cloneSnapshot(snapshotName, cloneTableName);
 
-      Table clonedTable = new HTable(UTIL.getConfiguration(), cloneTableName);
-
-      try {
+      try (Table clonedTable = UTIL.getConnection().getTable(cloneTableName)) {
         final int clonedTableRowCount = UTIL.countRows(clonedTable);
 
         Assert.assertEquals(
@@ -228,7 +224,6 @@ public class TestSnapshotCloneIndependence {
         Put p = new Put(Bytes.toBytes(rowKey));
         p.add(TEST_FAM, Bytes.toBytes("someQualifier"), Bytes.toBytes("someString"));
         original.put(p);
-        original.flushCommits();
 
         // Verify that it is not present in the original table
         Assert.assertEquals("The row count of the original table was not modified by the put",
@@ -240,7 +235,6 @@ public class TestSnapshotCloneIndependence {
         p = new Put(Bytes.toBytes(rowKey));
         p.add(TEST_FAM, Bytes.toBytes("someQualifier"), Bytes.toBytes("someString"));
         clonedTable.put(p);
-        clonedTable.flushCommits();
 
         // Verify that the new family is not in the restored table's description
         Assert.assertEquals(
@@ -248,13 +242,7 @@ public class TestSnapshotCloneIndependence {
           origTableRowCount + 1, UTIL.countRows(original));
         Assert.assertEquals("The row count of the cloned table was not modified by the put",
           clonedTableRowCount + 1, UTIL.countRows(clonedTable));
-      } finally {
-
-        clonedTable.close();
       }
-    } finally {
-
-      original.close();
     }
   }
 

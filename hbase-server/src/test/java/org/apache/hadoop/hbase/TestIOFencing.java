@@ -44,6 +44,7 @@ import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionThroughputController;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -117,14 +118,17 @@ public class TestIOFencing {
         throw new IOException(ex);
       }
     }
+
     @Override
-    public boolean compact(CompactionContext compaction, Store store) throws IOException {
+    public boolean compact(CompactionContext compaction, Store store,
+        CompactionThroughputController throughputController) throws IOException {
       try {
-        return super.compact(compaction, store);
+        return super.compact(compaction, store, throughputController);
       } finally {
         compactCount++;
       }
     }
+
     public int countStoreFiles() {
       int count = 0;
       for (Store store : stores.values()) {
@@ -268,7 +272,7 @@ public class TestIOFencing {
       compactingRegion = (CompactionBlockerRegion)testRegions.get(0);
       LOG.info("Blocking compactions");
       compactingRegion.stopCompactions();
-      long lastFlushTime = compactingRegion.getLastFlushTime();
+      long lastFlushTime = compactingRegion.getEarliestFlushTimeForAllStores();
       // Load some rows
       TEST_UTIL.loadNumericRows(table, FAMILY, 0, FIRST_BATCH_COUNT);
 
@@ -284,7 +288,7 @@ public class TestIOFencing {
 
       // Wait till flush has happened, otherwise there won't be multiple store files
       long startWaitTime = System.currentTimeMillis();
-      while (compactingRegion.getLastFlushTime() <= lastFlushTime ||
+      while (compactingRegion.getEarliestFlushTimeForAllStores() <= lastFlushTime ||
           compactingRegion.countStoreFiles() <= 1) {
         LOG.info("Waiting for the region to flush " + compactingRegion.getRegionNameAsString());
         Thread.sleep(1000);

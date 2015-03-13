@@ -43,8 +43,6 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.testclassification.RegionServerTests;
-import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.UnknownScannerException;
 import org.apache.hadoop.hbase.client.Delete;
@@ -56,6 +54,9 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.InclusiveStopFilter;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.WhileMatchFilter;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.testclassification.RegionServerTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Rule;
 import org.junit.Test;
@@ -136,7 +137,7 @@ public class TestScanner {
 
       InternalScanner s = r.getScanner(scan);
       int count = 0;
-      while (s.next(results)) {
+      while (NextState.hasMoreValues(s.next(results))) {
         count++;
       }
       s.close();
@@ -149,7 +150,7 @@ public class TestScanner {
       count = 0;
       Cell kv = null;
       results = new ArrayList<Cell>();
-      for (boolean first = true; s.next(results);) {
+      for (boolean first = true; NextState.hasMoreValues(s.next(results));) {
         kv = results.get(0);
         if (first) {
           assertTrue(CellUtil.matchingRow(kv,  startrow));
@@ -162,7 +163,7 @@ public class TestScanner {
       assertTrue(count > 10);
       s.close();
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 
@@ -172,7 +173,7 @@ public class TestScanner {
     InternalScanner s = r.getScanner(scan);
     boolean hasMore = true;
     while (hasMore) {
-      hasMore = s.next(results);
+      hasMore = NextState.hasMoreValues(s.next(results));
       for (Cell kv : results) {
         assertEquals((byte)'a', CellUtil.cloneRow(kv)[0]);
         assertEquals((byte)'b', CellUtil.cloneRow(kv)[1]);
@@ -188,7 +189,7 @@ public class TestScanner {
     InternalScanner s = r.getScanner(scan);
     boolean hasMore = true;
     while (hasMore) {
-      hasMore = s.next(results);
+      hasMore = NextState.hasMoreValues(s.next(results));
       for (Cell kv : results) {
         assertTrue(Bytes.compareTo(CellUtil.cloneRow(kv), stopRow) <= 0);
       }
@@ -215,7 +216,7 @@ public class TestScanner {
       rowInclusiveStopFilter(scan, stopRow);
 
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 
@@ -242,7 +243,7 @@ public class TestScanner {
         return;
       }
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 
@@ -355,7 +356,7 @@ public class TestScanner {
 
     } finally {
       // clean up
-      HRegion.closeHRegion(r);
+      HBaseTestingUtility.closeRegionAndWAL(r);
     }
   }
 
@@ -388,7 +389,7 @@ public class TestScanner {
           scan.addColumn(COLS[0],  EXPLICIT_COLS[ii]);
         }
         scanner = r.getScanner(scan);
-        while (scanner.next(results)) {
+        while (NextState.hasMoreValues(scanner.next(results))) {
           assertTrue(hasColumn(results, HConstants.CATALOG_FAMILY,
               HConstants.REGIONINFO_QUALIFIER));
           byte [] val = CellUtil.cloneValue(getColumn(results, HConstants.CATALOG_FAMILY,
@@ -475,7 +476,7 @@ public class TestScanner {
       LOG.error("Failed", e);
       throw e;
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 
@@ -498,7 +499,7 @@ public class TestScanner {
       LOG.error("Failed", e);
       throw e;
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 
@@ -555,7 +556,7 @@ public class TestScanner {
       assertTrue(CellUtil.matchingFamily(results.get(0), fam1));
       assertTrue(CellUtil.matchingFamily(results.get(1), fam2));
     } finally {
-      HRegion.closeHRegion(this.r);
+      HBaseTestingUtility.closeRegionAndWAL(this.r);
     }
   }
 

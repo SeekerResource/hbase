@@ -19,6 +19,7 @@ package org.apache.hadoop.hbase.protobuf;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import org.apache.hadoop.hbase.CellScannable;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -88,6 +89,7 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.EnableTableReques
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetClusterStatusRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetSchemaAlterStatusRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableDescriptorsRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableNamesRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableStateRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsCatalogJanitorEnabledRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsMasterRunningRequest;
@@ -484,6 +486,7 @@ public final class RequestConverter {
     builder.setCloseScanner(closeScanner);
     builder.setRegion(region);
     builder.setScan(ProtobufUtil.toScan(scan));
+    builder.setClientHandlesPartials(true);
     return builder.build();
   }
 
@@ -501,6 +504,7 @@ public final class RequestConverter {
     builder.setNumberOfRows(numberOfRows);
     builder.setCloseScanner(closeScanner);
     builder.setScannerId(scannerId);
+    builder.setClientHandlesPartials(true);
     return builder.build();
   }
 
@@ -520,6 +524,7 @@ public final class RequestConverter {
     builder.setCloseScanner(closeScanner);
     builder.setScannerId(scannerId);
     builder.setNextCallSeq(nextCallSeq);
+    builder.setClientHandlesPartials(true);
     return builder.build();
   }
 
@@ -737,10 +742,22 @@ public final class RequestConverter {
   */
  public static FlushRegionRequest
      buildFlushRegionRequest(final byte[] regionName) {
+   return buildFlushRegionRequest(regionName, false);
+ }
+
+ /**
+  * Create a protocol buffer FlushRegionRequest for a given region name
+  *
+  * @param regionName the name of the region to get info
+  * @return a protocol buffer FlushRegionRequest
+  */
+ public static FlushRegionRequest
+     buildFlushRegionRequest(final byte[] regionName, boolean writeFlushWALMarker) {
    FlushRegionRequest.Builder builder = FlushRegionRequest.newBuilder();
    RegionSpecifier region = buildRegionSpecifier(
      RegionSpecifierType.REGION_NAME, regionName);
    builder.setRegion(region);
+   builder.setWriteFlushWalMarker(writeFlushWALMarker);
    return builder.build();
  }
 
@@ -1049,7 +1066,7 @@ public final class RequestConverter {
   public static MoveRegionRequest buildMoveRegionRequest(
       final byte [] encodedRegionName, final byte [] destServerName) throws
       DeserializationException {
-	MoveRegionRequest.Builder builder = MoveRegionRequest.newBuilder();
+    MoveRegionRequest.Builder builder = MoveRegionRequest.newBuilder();
     builder.setRegion(
       buildRegionSpecifier(RegionSpecifierType.ENCODED_REGION_NAME,encodedRegionName));
     if (destServerName != null) {
@@ -1229,11 +1246,30 @@ public final class RequestConverter {
   /**
    * Creates a protocol buffer GetTableDescriptorsRequest
    *
+   * @param pattern The compiled regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
    * @return a GetTableDescriptorsRequest
    */
-  public static GetTableDescriptorsRequest buildGetTableDescriptorsRequest(final String pattern) {
+  public static GetTableDescriptorsRequest buildGetTableDescriptorsRequest(final Pattern pattern,
+      boolean includeSysTables) {
     GetTableDescriptorsRequest.Builder builder = GetTableDescriptorsRequest.newBuilder();
-    builder.setRegex(pattern);
+    if (pattern != null) builder.setRegex(pattern.toString());
+    builder.setIncludeSysTables(includeSysTables);
+    return builder.build();
+  }
+
+  /**
+   * Creates a protocol buffer GetTableNamesRequest
+   *
+   * @param pattern The compiled regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
+   * @return a GetTableNamesRequest
+   */
+  public static GetTableNamesRequest buildGetTableNamesRequest(final Pattern pattern,
+      boolean includeSysTables) {
+    GetTableNamesRequest.Builder builder = GetTableNamesRequest.newBuilder();
+    if (pattern != null) builder.setRegex(pattern.toString());
+    builder.setIncludeSysTables(includeSysTables);
     return builder.build();
   }
 

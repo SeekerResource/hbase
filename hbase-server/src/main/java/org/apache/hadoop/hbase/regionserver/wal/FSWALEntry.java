@@ -19,13 +19,21 @@ package org.apache.hadoop.hbase.regionserver.wal;
 
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.CollectionUtils;
+
+import com.google.common.collect.Sets;
 
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WALKey;
@@ -48,6 +56,7 @@ class FSWALEntry extends Entry {
   private final transient HTableDescriptor htd;
   private final transient HRegionInfo hri;
   private final transient List<Cell> memstoreCells;
+  private final Set<byte[]> familyNames;
 
   FSWALEntry(final long sequence, final WALKey key, final WALEdit edit,
       final AtomicLong referenceToRegionSequenceId, final boolean inMemstore,
@@ -59,6 +68,23 @@ class FSWALEntry extends Entry {
     this.hri = hri;
     this.sequence = sequence;
     this.memstoreCells = memstoreCells;
+    if (inMemstore) {
+      // construct familyNames here to reduce the work of log sinker.
+      ArrayList<Cell> cells = this.getEdit().getCells();
+      if (CollectionUtils.isEmpty(cells)) {
+        this.familyNames = Collections.<byte[]> emptySet();
+      } else {
+        Set<byte[]> familySet = Sets.newTreeSet(Bytes.BYTES_COMPARATOR);
+        for (Cell cell : cells) {
+          if (!CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
+            familySet.add(CellUtil.cloneFamily(cell));
+          }
+        }
+        this.familyNames = Collections.unmodifiableSet(familySet);
+      }
+    } else {
+      this.familyNames = Collections.<byte[]> emptySet();
+    }
   }
 
   public String toString() {
@@ -96,7 +122,7 @@ class FSWALEntry extends Entry {
    */
   long stampRegionSequenceId() throws IOException {
     long regionSequenceId = this.regionSequenceIdReference.incrementAndGet();
-    if (!this.getEdit().isReplay() && memstoreCells != null && !memstoreCells.isEmpty()) {
+    if (!this.getEdit().isReplay() && !CollectionUtils.isEmpty(memstoreCells)) {
       for (Cell cell : this.memstoreCells) {
         CellUtil.setSequenceId(cell, regionSequenceId);
       }
@@ -104,5 +130,12 @@ class FSWALEntry extends Entry {
     WALKey key = getKey();
     key.setLogSeqNum(regionSequenceId);
     return regionSequenceId;
+  }
+
+  /**
+   * @return the family names which are effected by this edit.
+   */
+  Set<byte[]> getFamilyNames() {
+    return familyNames;
   }
 }

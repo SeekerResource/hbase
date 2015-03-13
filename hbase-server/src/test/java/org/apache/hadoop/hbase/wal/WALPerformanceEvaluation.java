@@ -21,9 +21,11 @@ package org.apache.hadoop.hbase.wal;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -42,21 +44,26 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MockRegionServerServices;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.io.crypto.KeyProviderForTesting;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.LogRoller;
+import org.apache.hadoop.hbase.trace.HBaseHTraceConfiguration;
 import org.apache.hadoop.hbase.trace.SpanReceiverHost;
 import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.htrace.Sampler;
-import org.htrace.Trace;
-import org.htrace.TraceScope;
-import org.htrace.impl.ProbabilitySampler;
+import org.apache.htrace.HTraceConfiguration;
+import org.apache.htrace.Sampler;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
+import org.apache.htrace.impl.ProbabilitySampler;
 
 import com.yammer.metrics.core.Histogram;
 import com.yammer.metrics.core.Meter;
@@ -145,7 +152,8 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
               + " SpanReciever can keep up.");
           }
         } else {
-          loopSampler = new ProbabilitySampler(traceFreq);
+          getConf().setDouble("hbase.sampler.fraction", traceFreq);
+          loopSampler = new ProbabilitySampler(new HBaseHTraceConfiguration(getConf()));
         }
       }
     }
@@ -311,13 +319,16 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       final WALFactory wals = new WALFactory(getConf(), null, "wals");
       final HRegion[] regions = new HRegion[numRegions];
       final Runnable[] benchmarks = new Runnable[numRegions];
+      final MockRegionServerServices mockServices = new MockRegionServerServices(getConf());
+      final LogRoller roller = new LogRoller(mockServices, mockServices);
+      Threads.setDaemonThreadRunning(roller.getThread(), "WALPerfEval.logRoller");
 
       try {
         for(int i = 0; i < numRegions; i++) {
           // Initialize Table Descriptor
           // a table per desired region means we can avoid carving up the key space
           final HTableDescriptor htd = createHTableDescriptor(i, numFamilies);
-          regions[i] = openRegion(fs, rootRegionDir, htd, wals, roll);
+          regions[i] = openRegion(fs, rootRegionDir, htd, wals, roll, roller);
           benchmarks[i] = Trace.wrap(new WALPutBenchmark(regions[i], htd, numIterations, noSync,
               syncInterval, traceFreq));
         }
@@ -333,6 +344,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
           }
         }
         if (verify) {
+          LOG.info("verifying written log entries.");
           Path dir = new Path(FSUtils.getRootDir(getConf()),
               DefaultWALProvider.getWALDirectoryName("wals"));
           long editCount = 0;
@@ -349,10 +361,15 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
           }
         }
       } finally {
+        mockServices.stop("test clean up.");
         for (int i = 0; i < numRegions; i++) {
           if (regions[i] != null) {
             closeRegion(regions[i]);
           }
+        }
+        if (null != roller) {
+          LOG.info("shutting down log roller.");
+          Threads.shutdown(roller.getThread());
         }
         wals.shutdown();
         // Remove the root dir for this test region
@@ -460,43 +477,46 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
     System.exit(1);
   }
 
+  private final Set<WAL> walsListenedTo = new HashSet<WAL>();
+
   private HRegion openRegion(final FileSystem fs, final Path dir, final HTableDescriptor htd,
-      final WALFactory wals, final long whenToRoll) throws IOException {
+      final WALFactory wals, final long whenToRoll, final LogRoller roller) throws IOException {
     // Initialize HRegion
     HRegionInfo regionInfo = new HRegionInfo(htd.getTableName());
     // Initialize WAL
     final WAL wal = wals.getWAL(regionInfo.getEncodedNameAsBytes());
-    wal.registerWALActionsListener(new WALActionsListener.Base() {
-      private int appends = 0;
+    // If we haven't already, attach a listener to this wal to handle rolls and metrics.
+    if (walsListenedTo.add(wal)) {
+      roller.addWAL(wal);
+      wal.registerWALActionsListener(new WALActionsListener.Base() {
+        private int appends = 0;
 
-      @Override
-      public void visitLogEntryBeforeWrite(HTableDescriptor htd, WALKey logKey,
-          WALEdit logEdit) {
-        this.appends++;
-        if (this.appends % whenToRoll == 0) {
-          LOG.info("Rolling after " + appends + " edits");
-          // We used to do explicit call to rollWriter but changed it to a request
-          // to avoid dead lock (there are less threads going on in this class than
-          // in the regionserver -- regionserver does not have the issue).
-          // TODO I think this means no rolling actually happens; the request relies on there
-          // being a LogRoller.
-          DefaultWALProvider.requestLogRoll(wal);
+        @Override
+        public void visitLogEntryBeforeWrite(HTableDescriptor htd, WALKey logKey,
+            WALEdit logEdit) {
+          this.appends++;
+          if (this.appends % whenToRoll == 0) {
+            LOG.info("Rolling after " + appends + " edits");
+            // We used to do explicit call to rollWriter but changed it to a request
+            // to avoid dead lock (there are less threads going on in this class than
+            // in the regionserver -- regionserver does not have the issue).
+            DefaultWALProvider.requestLogRoll(wal);
+          }
         }
-      }
 
-      @Override
-      public void postSync(final long timeInNanos, final int handlerSyncs) {
-        syncMeter.mark();
-        syncHistogram.update(timeInNanos);
-        syncCountHistogram.update(handlerSyncs);
-      }
+        @Override
+        public void postSync(final long timeInNanos, final int handlerSyncs) {
+          syncMeter.mark();
+          syncHistogram.update(timeInNanos);
+          syncCountHistogram.update(handlerSyncs);
+        }
 
-      @Override
-      public void postAppend(final long size, final long elapsedTime) {
-        appendMeter.mark(size);
-      }
-    });
-    wal.rollWriter();
+        @Override
+        public void postAppend(final long size, final long elapsedTime) {
+          appendMeter.mark(size);
+        }
+      });
+    }
      
     return HRegion.createHRegion(regionInfo, dir, getConf(), htd, wal);
   }

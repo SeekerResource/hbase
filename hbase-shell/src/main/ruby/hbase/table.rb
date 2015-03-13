@@ -111,33 +111,15 @@ EOF
     # let external objects read the table name
     attr_reader :name
 
-    def initialize(configuration, table_name, shell)
-      # Commenting out the HTable.new() calls and uncommenting the @connection approach causes
-      # Zookeepr exceptions.  Interestingly, there were changes in admin.rb to convert 
-      # HBaseAdmin.new() calls to ConnectionFactory.createConnection().getAdmin().  Either change
-      # of ConnectionFactory.createConnection().getTable() or
-      # ConnectionFactory.createConnection().getAdmin() by itself doesn't cause the Zookeper 
-      # exception.  Somehow the combination of the two causes the issue.
-
-      # TODO: Uncomment the createConnection approach after the underlying problem is fixed.
- 
-      if @@thread_pool then
-        @table = org.apache.hadoop.hbase.client.HTable.new(configuration, table_name.to_java_bytes,
-          @@thread_pool)
-        # @connection = org.apache.hadoop.hbase.client.ConnectionFactory.createConnection(
-        #  configuration, @@thread_pool)
-        # @table = @connection.getTable(table_name)
-      else
-        # @connection = org.apache.hadoop.hbase.client.ConnectionFactory.createConnection(
-        #  configuration)
-        # @table = @connection.getTable(table_name)
-        @table = org.apache.hadoop.hbase.client.HTable.new(configuration, table_name)
-        @@thread_pool = @table.getPool()
-      end
-      
-      @name = table_name
+    def initialize(table, shell)
+      @table = table
+      @name = @table.getName().getNameAsString()
       @shell = shell
       @converters = Hash.new()
+    end
+
+    def close()
+      @table.close()
     end
 
     # Note the below methods are prefixed with '_' to hide them from the average user, as
@@ -153,17 +135,19 @@ EOF
          set_attributes(p, attributes) if attributes
          visibility = args[VISIBILITY]
          set_cell_visibility(p, visibility) if visibility
+         ttl = args[TTL]
+         set_op_ttl(p, ttl) if ttl
       end
       #Case where attributes are specified without timestamp
       if timestamp.kind_of?(Hash)
       	timestamp.each do |k, v|
-      	  if v.kind_of?(Hash)
-      	  	set_attributes(p, v) if v
-      	  end
-      	  if v.kind_of?(String)
-      	  	set_cell_visibility(p, v) if v
-      	  end
-      	  
+          if k == 'ATTRIBUTES'
+            set_attributes(p, v)
+          elsif k == 'VISIBILITY'
+            set_cell_visibility(p, v)
+          elsif k == "TTL"
+            set_op_ttl(p, v)
+          end
         end
         timestamp = nil
       end  
@@ -231,6 +215,8 @@ EOF
       	visibility = args[VISIBILITY]
         set_attributes(incr, attributes) if attributes
         set_cell_visibility(incr, visibility) if visibility
+        ttl = args[TTL]
+        set_op_ttl(incr, ttl) if ttl
       end
       incr.addColumn(family, qualifier, value)
       @table.increment(incr)
@@ -249,6 +235,8 @@ EOF
       	visibility = args[VISIBILITY]
         set_attributes(append, attributes) if attributes
         set_cell_visibility(append, visibility) if visibility
+        ttl = args[TTL]
+        set_op_ttl(append, ttl) if ttl
       end
       append.add(family, qualifier, value.to_s.to_java_bytes)
       @table.append(append)
@@ -417,6 +405,7 @@ EOF
         filter = args["FILTER"]
         startrow = args["STARTROW"] || ''
         stoprow = args["STOPROW"]
+        rowprefixfilter = args["ROWPREFIXFILTER"]
         timestamp = args["TIMESTAMP"]
         columns = args["COLUMNS"] || args["COLUMN"] || []
         # If CACHE_BLOCKS not set, then default 'true'.
@@ -440,6 +429,9 @@ EOF
         else
           org.apache.hadoop.hbase.client.Scan.new(startrow.to_java_bytes)
         end
+
+        # This will overwrite any startrow/stoprow settings
+        scan.setRowPrefixFilter(rowprefixfilter.to_java_bytes) if rowprefixfilter
 
         columns.each do |c| 
           family, qualifier = parse_column_name(c.to_s)
@@ -557,6 +549,10 @@ EOF
           auths.to_java(:string)))
     end
 
+    def set_op_ttl(op, ttl)
+      op.setTTL(ttl.to_java(:long))
+    end
+
     #----------------------------
     # Add general administration utilities to the shell
     # each of the names below adds this method name to the table
@@ -614,9 +610,7 @@ EOF
 
     # Checks if current table is one of the 'meta' tables
     def is_meta_table?
-      tn = @table.table_name
-      org.apache.hadoop.hbase.util.Bytes.equals(tn,
-          org.apache.hadoop.hbase.TableName::META_TABLE_NAME.getName)
+      org.apache.hadoop.hbase.TableName::META_TABLE_NAME.equals(@table.getName())
     end
 
     # Returns family and (when has it) qualifier for a column name
@@ -683,6 +677,17 @@ EOF
         @converters["#{family}:#{String.from_java_bytes(parts[0])}"] = String.from_java_bytes(parts[1])
         column[1] = parts[0]
       end
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Get the split points for the table
+    def _get_splits_internal()
+      locator = @table.getRegionLocator()
+      splits = locator.getAllRegionLocations().
+          map{|i| Bytes.toStringBinary(i.getRegionInfo().getStartKey)}.delete_if{|k| k == ""}
+      locator.close()
+      puts("Total number of splits = %s" % [splits.size + 1])
+      return splits
     end
   end
 end

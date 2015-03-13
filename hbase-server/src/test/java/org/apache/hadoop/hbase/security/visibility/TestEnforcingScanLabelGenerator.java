@@ -28,6 +28,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
@@ -119,9 +121,30 @@ public class TestEnforcingScanLabelGenerator {
       }
     });
 
+    // Test that super user can see all the cells.
+    SUPERUSER.runAs(new PrivilegedExceptionAction<Void>() {
+      public Void run() throws Exception {
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table table = connection.getTable(tableName);
+        try {
+          // Test that super user can see all the cells.
+          Get get = new Get(ROW_1);
+          Result result = table.get(get);
+          assertTrue("Missing authorization", result.containsColumn(CF, Q1));
+          assertTrue("Missing authorization", result.containsColumn(CF, Q2));
+          assertTrue("Missing authorization", result.containsColumn(CF, Q3));
+          return null;
+        } finally {
+          table.close();
+          connection.close();
+        }
+      }
+    });
+
     TESTUSER.runAs(new PrivilegedExceptionAction<Void>() {
       public Void run() throws Exception {
-        Table table = new HTable(conf, tableName);
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table table = connection.getTable(tableName);
         try {
           // Test that we enforce the defined set
           Get get = new Get(ROW_1);
@@ -139,6 +162,7 @@ public class TestEnforcingScanLabelGenerator {
           return null;
         } finally {
           table.close();
+          connection.close();
         }
       }
     });

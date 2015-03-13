@@ -47,8 +47,6 @@ import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
@@ -134,7 +132,7 @@ public class TestMasterOperationsForRegionReplicas {
         }
       }
 
-      List<Result> metaRows = MetaTableAccessor.fullScanOfMeta(ADMIN.getConnection());
+      List<Result> metaRows = MetaTableAccessor.fullScanRegions(ADMIN.getConnection());
       int numRows = 0;
       for (Result result : metaRows) {
         RegionLocations locations = MetaTableAccessor.getRegionLocations(result);
@@ -157,7 +155,7 @@ public class TestMasterOperationsForRegionReplicas {
       ServerName master = TEST_UTIL.getHBaseClusterInterface().getClusterStatus().getMaster();
       TEST_UTIL.getHBaseClusterInterface().stopMaster(master);
       TEST_UTIL.getHBaseClusterInterface().waitForMasterToStop(master, 30000);
-      TEST_UTIL.getHBaseClusterInterface().startMaster(master.getHostname());
+      TEST_UTIL.getHBaseClusterInterface().startMaster(master.getHostname(), master.getPort());
       TEST_UTIL.getHBaseClusterInterface().waitForActiveAndReadyMaster();
       for (int i = 0; i < numRegions; i++) {
         for (int j = 0; j < numReplica; j++) {
@@ -253,7 +251,7 @@ public class TestMasterOperationsForRegionReplicas {
       ADMIN.disableTable(table);
       // now delete one replica info from all the rows
       // this is to make the meta appear to be only partially updated
-      Table metaTable = new HTable(TableName.META_TABLE_NAME, ADMIN.getConnection());
+      Table metaTable = ADMIN.getConnection().getTable(TableName.META_TABLE_NAME);
       for (byte[] row : tableRows) {
         Delete deleteOneReplicaLocation = new Delete(row);
         deleteOneReplicaLocation.deleteColumns(HConstants.CATALOG_FAMILY,
@@ -297,7 +295,7 @@ public class TestMasterOperationsForRegionReplicas {
         return true;
       }
     };
-    MetaTableAccessor.fullScan(connection, visitor);
+    MetaTableAccessor.fullScanRegions(connection, visitor);
     assert(count.get() == numRegions);
   }
 

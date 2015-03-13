@@ -42,6 +42,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSTableDescriptors;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -149,9 +150,8 @@ public abstract class HBaseTestCase extends TestCase {
     }
 
   /**
-   * You must call close on the returned region and then close on the log file
-   * it created. Do {@link HRegion#close()} followed by {@link HRegion#getWAL()}
-   * and on it call close.
+   * You must call close on the returned region and then close on the log file it created. Do
+   * {@link HBaseTestingUtility#closeRegionAndWAL(HRegion)} to close both the region and the WAL.
    * @param desc
    * @param startKey
    * @param endKey
@@ -168,7 +168,7 @@ public abstract class HBaseTestCase extends TestCase {
       byte [] endKey, Configuration conf)
   throws IOException {
     HRegionInfo hri = new HRegionInfo(desc.getTableName(), startKey, endKey);
-    return HRegion.createHRegion(hri, testDir, conf, desc);
+    return HBaseTestingUtility.createRegionAndWAL(hri, testDir, conf, desc);
   }
 
   protected HRegion openClosedRegion(final HRegion closedRegion)
@@ -564,7 +564,7 @@ public abstract class HBaseTestCase extends TestCase {
     @Override
     public boolean next(List<Cell> results)
     throws IOException {
-      return scanner.next(results);
+      return NextState.hasMoreValues(scanner.next(results));
     }
 
     @Override
@@ -641,12 +641,12 @@ public abstract class HBaseTestCase extends TestCase {
    */
   protected void createMetaRegion() throws IOException {
     FSTableDescriptors fsTableDescriptors = new FSTableDescriptors(conf);
-    meta = HRegion.createHRegion(HRegionInfo.FIRST_META_REGIONINFO, testDir,
-        conf, fsTableDescriptors.get(TableName.META_TABLE_NAME) );
+    meta = HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO, testDir,
+        conf, fsTableDescriptors.get(TableName.META_TABLE_NAME));
   }
 
   protected void closeRootAndMeta() throws IOException {
-    HRegion.closeHRegion(meta);
+    HBaseTestingUtility.closeRegionAndWAL(meta);
   }
 
   public static void assertByteEquals(byte[] expected,

@@ -36,6 +36,8 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.HasThread;
 import org.apache.hadoop.ipc.RemoteException;
 
+import com.google.common.annotations.VisibleForTesting;
+
 /**
  * Runs periodically to determine if the WAL should be rolled.
  *
@@ -46,7 +48,8 @@ import org.apache.hadoop.ipc.RemoteException;
  * TODO: change to a pool of threads
  */
 @InterfaceAudience.Private
-class LogRoller extends HasThread {
+@VisibleForTesting
+public class LogRoller extends HasThread {
   static final Log LOG = LogFactory.getLog(LogRoller.class);
   private final ReentrantLock rollLock = new ReentrantLock();
   private final AtomicBoolean rollLog = new AtomicBoolean(false);
@@ -63,7 +66,7 @@ class LogRoller extends HasThread {
     if (null == walNeedsRoll.putIfAbsent(wal, Boolean.FALSE)) {
       wal.registerWALActionsListener(new WALActionsListener.Base() {
         @Override
-        public void logRollRequested() {
+        public void logRollRequested(boolean lowReplicas) {
           walNeedsRoll.put(wal, Boolean.TRUE);
           // TODO logs will contend with each other here, replace with e.g. DelayedQueue
           synchronized(rollLog) {
@@ -166,7 +169,8 @@ class LogRoller extends HasThread {
     if (r != null) {
       requester = this.services.getFlushRequester();
       if (requester != null) {
-        requester.requestFlush(r);
+        // force flushing all stores to clean old logs
+        requester.requestFlush(r, true);
         scheduled = true;
       }
     }

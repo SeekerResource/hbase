@@ -34,12 +34,14 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -51,17 +53,18 @@ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 /**
  * WALPrettyPrinter prints the contents of a given WAL with a variety of
  * options affecting formatting and extent of content.
- * 
+ *
  * It targets two usage cases: pretty printing for ease of debugging directly by
  * humans, and JSON output for consumption by monitoring and/or maintenance
  * scripts.
- * 
+ *
  * It can filter by row, region, or sequence id.
- * 
+ *
  * It can also toggle output of values.
- * 
+ *
  */
-@InterfaceAudience.Private
+@InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.TOOLS)
+@InterfaceStability.Evolving
 public class WALPrettyPrinter {
   private boolean outputValues;
   private boolean outputJSON;
@@ -72,7 +75,7 @@ public class WALPrettyPrinter {
   // enable in order to output a single list of transactions from several files
   private boolean persistentOutput;
   private boolean firstTxn;
-  // useful for programatic capture of JSON output
+  // useful for programmatic capture of JSON output
   private PrintStream out;
   // for JSON encoding
   private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -93,7 +96,7 @@ public class WALPrettyPrinter {
 
   /**
    * Fully specified constructor.
-   * 
+   *
    * @param outputValues
    *          when true, enables output of values along with other log
    *          information
@@ -113,7 +116,7 @@ public class WALPrettyPrinter {
    *          keeps a single list running for multiple files. if enabled, the
    *          endPersistentOutput() method must be used!
    * @param out
-   *          Specifies an alternative to stdout for the destination of this 
+   *          Specifies an alternative to stdout for the destination of this
    *          PrettyPrinter's output.
    */
   public WALPrettyPrinter(boolean outputValues, boolean outputJSON,
@@ -162,7 +165,7 @@ public class WALPrettyPrinter {
 
   /**
    * sets the region by which output will be filtered
-   * 
+   *
    * @param sequence
    *          when nonnegative, serves as a filter; only log entries with this
    *          sequence id will be printed
@@ -173,7 +176,7 @@ public class WALPrettyPrinter {
 
   /**
    * sets the region by which output will be filtered
-   * 
+   *
    * @param region
    *          when not null, serves as a filter; only log entries from this
    *          region will be printed
@@ -184,7 +187,7 @@ public class WALPrettyPrinter {
 
   /**
    * sets the region by which output will be filtered
-   * 
+   *
    * @param row
    *          when not null, serves as a filter; only log entries from this row
    *          will be printed
@@ -221,7 +224,7 @@ public class WALPrettyPrinter {
   /**
    * reads a log file and outputs its contents, one transaction at a time, as
    * specified by the currently configured options
-   * 
+   *
    * @param conf
    *          the HBase configuration relevant to this log file
    * @param p
@@ -264,8 +267,9 @@ public class WALPrettyPrinter {
           Map<String, Object> op = new HashMap<String, Object>(toStringMap(cell));
           if (outputValues) op.put("value", Bytes.toStringBinary(cell.getValue()));
           // check row output filter
-          if (row == null || ((String) op.get("row")).equals(row))
+          if (row == null || ((String) op.get("row")).equals(row)) {
             actions.add(op);
+          }
         }
         if (actions.size() == 0)
           continue;
@@ -280,22 +284,16 @@ public class WALPrettyPrinter {
           out.print(MAPPER.writeValueAsString(txn));
         } else {
           // Pretty output, complete with indentation by atomic action
-          out.println("Sequence " + txn.get("sequence") + " "
-              + "from region " + txn.get("region") + " " + "in table "
-              + txn.get("table") + " at write timestamp: " + new Date(writeTime));
+          out.println("Sequence=" + txn.get("sequence") + " "
+              + ", region=" + txn.get("region") + " at write timestamp=" + new Date(writeTime));
           for (int i = 0; i < actions.size(); i++) {
             Map op = actions.get(i);
-            out.println("  Action:");
-            out.println("    row: " + op.get("row"));
-            out.println("    column: " + op.get("family") + ":"
-                + op.get("qualifier"));
-            out.println("    timestamp: "
-                + (new Date((Long) op.get("timestamp"))));
-            if(op.get("tag") != null) {
+            out.println("row=" + op.get("row") +
+                ", column=" + op.get("family") + ":" + op.get("qualifier"));
+            if (op.get("tag") != null) {
               out.println("    tag: " + op.get("tag"));
             }
-            if (outputValues)
-              out.println("    value: " + op.get("value"));
+            if (outputValues) out.println("    value: " + op.get("value"));
           }
         }
       }
@@ -339,13 +337,11 @@ public class WALPrettyPrinter {
   /**
    * Pass one or more log file names and formatting options and it will dump out
    * a text version of the contents on <code>stdout</code>.
-   * 
+   *
    * @param args
    *          Command line arguments
    * @throws IOException
    *           Thrown upon file system errors etc.
-   * @throws ParseException
-   *           Thrown if command-line parsing fails.
    */
   public static void run(String[] args) throws IOException {
     // create options
@@ -354,14 +350,14 @@ public class WALPrettyPrinter {
     options.addOption("j", "json", false, "Output JSON");
     options.addOption("p", "printvals", false, "Print values");
     options.addOption("r", "region", true,
-        "Region to filter by. Pass region name; e.g. 'hbase:meta,,1'");
+        "Region to filter by. Pass encoded region name; e.g. '9192caead6a5a20acb4454ffbc79fa14'");
     options.addOption("s", "sequence", true,
         "Sequence to filter by. Pass sequence number.");
     options.addOption("w", "row", true, "Row to filter by. Pass row name.");
 
     WALPrettyPrinter printer = new WALPrettyPrinter();
     CommandLineParser parser = new PosixParser();
-    List files = null;
+    List<?> files = null;
     try {
       CommandLine cmd = parser.parse(options, args);
       files = cmd.getArgList();

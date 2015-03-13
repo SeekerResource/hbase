@@ -49,14 +49,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import com.google.protobuf.ServiceException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -69,12 +65,11 @@ import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.TagRewriteCell;
-import org.apache.hadoop.hbase.TagType;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ConnectionUtils;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
@@ -82,9 +77,9 @@ import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.coordination.BaseCoordinatedStateManager;
 import org.apache.hadoop.hbase.coordination.ZKSplitLogManagerCoordination;
-import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.exceptions.RegionOpeningException;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.master.SplitLogManager;
@@ -97,16 +92,19 @@ import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.GetRegionInfoReque
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.GetRegionInfoResponse;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.WALEntry;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.MutationType;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.protobuf.generated.WALProtos.CompactionDescriptor;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.StoreSequenceId;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.LastSequenceId;
-import org.apache.hadoop.hbase.wal.WAL.Entry;
-import org.apache.hadoop.hbase.wal.WAL.Reader;
-import org.apache.hadoop.hbase.wal.WALProvider.Writer;
+// imports for things that haven't moved from regionserver.wal yet.
+import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
+import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
+import org.apache.hadoop.hbase.regionserver.wal.WALCellCodec;
+import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.regionserver.wal.WALEditsReplaySink;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.hadoop.hbase.util.ClassSize;
@@ -114,16 +112,17 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.wal.WAL.Entry;
+import org.apache.hadoop.hbase.wal.WAL.Reader;
+import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.ipc.RemoteException;
 
-// imports for things that haven't moved from regionserver.wal yet.
-import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
-import org.apache.hadoop.hbase.regionserver.wal.WALEditsReplaySink;
-import org.apache.hadoop.hbase.regionserver.wal.WALCellCodec;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.protobuf.ServiceException;
 
 /**
  * This class is responsible for splitting up a bunch of regionserver commit log
@@ -148,8 +147,8 @@ public class WALSplitter {
   OutputSink outputSink;
   EntryBuffers entryBuffers;
 
-  private Set<TableName> disablingOrDisabledTables =
-      new HashSet<TableName>();
+  private Map<TableName, TableState> tableStatesCache =
+      new ConcurrentHashMap<>();
   private BaseCoordinatedStateManager csm;
   private final WALFactory walFactory;
 
@@ -267,8 +266,7 @@ public class WALSplitter {
    * log splitting implementation, splits one log file.
    * @param logfile should be an actual log file.
    */
-  boolean splitLogFile(FileStatus logfile,
-      CancelableProgressable reporter) throws IOException {
+  boolean splitLogFile(FileStatus logfile, CancelableProgressable reporter) throws IOException {
     Preconditions.checkState(status == null);
     Preconditions.checkArgument(logfile.isFile(),
         "passed in file status is for something other than a regular file.");
@@ -306,16 +304,6 @@ public class WALSplitter {
         LOG.warn("Nothing to split in log file " + logPath);
         return true;
       }
-      if(csm != null) {
-        HConnection scc = csm.getServer().getConnection();
-        TableName[] tables = scc.listTableNames();
-        for (TableName table : tables) {
-          if (scc.getTableState(table)
-              .inStates(TableState.State.DISABLED, TableState.State.DISABLING)) {
-            disablingOrDisabledTables.add(table);
-          }
-        }
-      }
       int numOpenedFilesBeforeReporting = conf.getInt("hbase.splitlog.report.openedfiles", 3);
       int numOpenedFilesLastCheck = 0;
       outputSink.setReporter(reporter);
@@ -338,7 +326,14 @@ public class WALSplitter {
               lastFlushedSequenceId = ids.getLastFlushedSequenceId();
             }
           } else if (sequenceIdChecker != null) {
-            lastFlushedSequenceId = sequenceIdChecker.getLastSequenceId(region);
+            RegionStoreSequenceIds ids = sequenceIdChecker.getLastSequenceId(region);
+            Map<byte[], Long> maxSeqIdInStores = new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
+            for (StoreSequenceId storeSeqId : ids.getStoreSequenceIdList()) {
+              maxSeqIdInStores.put(storeSeqId.getFamilyName().toByteArray(),
+                storeSeqId.getSequenceId());
+            }
+            regionMaxSeqIdInStores.put(key, maxSeqIdInStores);
+            lastFlushedSequenceId = ids.getLastFlushedSequenceId();
           }
           if (lastFlushedSequenceId == null) {
             lastFlushedSequenceId = -1L;
@@ -397,8 +392,9 @@ public class WALSplitter {
       } finally {
         String msg =
             "Processed " + editsCount + " edits across " + outputSink.getNumberOfRecoveredRegions()
-                + " regions; log file=" + logPath + " is corrupted = " + isCorrupted
-                + " progress failed = " + progress_failed;
+                + " regions; edits skipped=" + editsSkipped + "; log file=" + logPath +
+                ", length=" + logfile.getLen() + // See if length got updated post lease recovery
+                ", corrupted=" + isCorrupted + ", progress failed=" + progress_failed;
         LOG.info(msg);
         status.markComplete(msg);
       }
@@ -613,6 +609,10 @@ public class WALSplitter {
           if (p.getName().endsWith(RECOVERED_LOG_TMPFILE_SUFFIX)) {
             result = false;
           }
+          // Skip SeqId Files
+          if (isSequenceIdFile(p)) {
+            result = false;
+          }
         } catch (IOException e) {
           LOG.warn("Failed isFile check on " + p);
         }
@@ -647,19 +647,21 @@ public class WALSplitter {
     return moveAsideName;
   }
 
-  private static final String SEQUENCE_ID_FILE_SUFFIX = "_seqid";
+  private static final String SEQUENCE_ID_FILE_SUFFIX = ".seqid";
+  private static final String OLD_SEQUENCE_ID_FILE_SUFFIX = "_seqid";
+  private static final int SEQUENCE_ID_FILE_SUFFIX_LENGTH = SEQUENCE_ID_FILE_SUFFIX.length();
 
   /**
    * Is the given file a region open sequence id file.
    */
   @VisibleForTesting
   public static boolean isSequenceIdFile(final Path file) {
-    return file.getName().endsWith(SEQUENCE_ID_FILE_SUFFIX);
+    return file.getName().endsWith(SEQUENCE_ID_FILE_SUFFIX)
+        || file.getName().endsWith(OLD_SEQUENCE_ID_FILE_SUFFIX);
   }
 
   /**
    * Create a file with name as region open sequence id
-   * 
    * @param fs
    * @param regiondir
    * @param newSeqId
@@ -667,10 +669,10 @@ public class WALSplitter {
    * @return long new sequence Id value
    * @throws IOException
    */
-  public static long writeRegionOpenSequenceIdFile(final FileSystem fs, final Path regiondir,
+  public static long writeRegionSequenceIdFile(final FileSystem fs, final Path regiondir,
       long newSeqId, long saftyBumper) throws IOException {
 
-    Path editsdir = getRegionDirRecoveredEditsDir(regiondir);
+    Path editsdir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
     long maxSeqId = 0;
     FileStatus[] files = null;
     if (fs.exists(editsdir)) {
@@ -685,7 +687,7 @@ public class WALSplitter {
           String fileName = status.getPath().getName();
           try {
             Long tmpSeqId = Long.parseLong(fileName.substring(0, fileName.length()
-                    - SEQUENCE_ID_FILE_SUFFIX.length()));
+                - SEQUENCE_ID_FILE_SUFFIX_LENGTH));
             maxSeqId = Math.max(tmpSeqId, maxSeqId);
           } catch (NumberFormatException ex) {
             LOG.warn("Invalid SeqId File Name=" + fileName);
@@ -697,15 +699,28 @@ public class WALSplitter {
       newSeqId = maxSeqId;
     }
     newSeqId += saftyBumper; // bump up SeqId
-    
+
     // write a new seqId file
     Path newSeqIdFile = new Path(editsdir, newSeqId + SEQUENCE_ID_FILE_SUFFIX);
-    if (!fs.createNewFile(newSeqIdFile)) {
-      throw new IOException("Failed to create SeqId file:" + newSeqIdFile);
+    if (newSeqId != maxSeqId) {
+      try {
+        if (!fs.createNewFile(newSeqIdFile) && !fs.exists(newSeqIdFile)) {
+          throw new IOException("Failed to create SeqId file:" + newSeqIdFile);
+        }
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Wrote region seqId=" + newSeqIdFile + " to file, newSeqId=" + newSeqId
+              + ", maxSeqId=" + maxSeqId);
+        }
+      } catch (FileAlreadyExistsException ignored) {
+        // latest hdfs throws this exception. it's all right if newSeqIdFile already exists
+      }
     }
     // remove old ones
-    if(files != null) {
+    if (files != null) {
       for (FileStatus status : files) {
+        if (newSeqIdFile.equals(status.getPath())) {
+          continue;
+        }
         fs.delete(status.getPath(), false);
       }
     }
@@ -1178,12 +1193,18 @@ public class WALSplitter {
      * @return true when there is no error
      * @throws IOException
      */
-    protected boolean finishWriting() throws IOException {
+    protected boolean finishWriting(boolean interrupt) throws IOException {
       LOG.debug("Waiting for split writer threads to finish");
       boolean progress_failed = false;
       for (WriterThread t : writerThreads) {
         t.finish();
       }
+      if (interrupt) {
+        for (WriterThread t : writerThreads) {
+          t.interrupt(); // interrupt the writer threads. We are stopping now.
+        }
+      }
+
       for (WriterThread t : writerThreads) {
         if (!progress_failed && reporter != null && !reporter.progress()) {
           progress_failed = true;
@@ -1252,7 +1273,7 @@ public class WALSplitter {
       boolean isSuccessful = false;
       List<Path> result = null;
       try {
-        isSuccessful = finishWriting();
+        isSuccessful = finishWriting(false);
       } finally {
         result = close();
         List<IOException> thrown = closeLogWriters(null);
@@ -1465,6 +1486,29 @@ public class WALSplitter {
       return (new WriterAndPath(regionedits, w));
     }
 
+    private void filterCellByStore(Entry logEntry) {
+      Map<byte[], Long> maxSeqIdInStores =
+          regionMaxSeqIdInStores.get(Bytes.toString(logEntry.getKey().getEncodedRegionName()));
+      if (maxSeqIdInStores == null || maxSeqIdInStores.isEmpty()) {
+        return;
+      }
+      List<Cell> skippedCells = new ArrayList<Cell>();
+      for (Cell cell : logEntry.getEdit().getCells()) {
+        if (!CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
+          byte[] family = CellUtil.cloneFamily(cell);
+          Long maxSeqId = maxSeqIdInStores.get(family);
+          // Do not skip cell even if maxSeqId is null. Maybe we are in a rolling upgrade,
+          // or the master was crashed before and we can not get the information.
+          if (maxSeqId != null && maxSeqId.longValue() >= logEntry.getKey().getLogSeqNum()) {
+            skippedCells.add(cell);
+          }
+        }
+      }
+      if (!skippedCells.isEmpty()) {
+        logEntry.getEdit().getCells().removeAll(skippedCells);
+      }
+    }
+
     @Override
     public void append(RegionEntryBuffer buffer) throws IOException {
       List<Entry> entries = buffer.entryBuffer;
@@ -1489,7 +1533,10 @@ public class WALSplitter {
               return;
             }
           }
-          wap.w.append(logEntry);
+          filterCellByStore(logEntry);
+          if (!logEntry.getEdit().isEmpty()) {
+            wap.w.append(logEntry);
+          }
           this.updateRegionMaximumEditLogSeqNum(logEntry);
           editsCount++;
         }
@@ -1608,7 +1655,7 @@ public class WALSplitter {
       }
 
       // check if current region in a disabling or disabled table
-      if (disablingOrDisabledTables.contains(buffer.tableName)) {
+      if (isTableDisabledOrDisabling(buffer.tableName)) {
         // need fall back to old way
         logRecoveredEditsOutputSink.append(buffer);
         hasEditsInDisablingOrDisabledTables = true;
@@ -1681,8 +1728,8 @@ public class WALSplitter {
         HConnection hconn = this.getConnectionByTableName(table);
 
         for (Cell cell : cells) {
-          byte[] row = cell.getRow();
-          byte[] family = cell.getFamily();
+          byte[] row = CellUtil.cloneRow(cell);
+          byte[] family = CellUtil.cloneFamily(cell);
           boolean isCompactionEntry = false;
           if (CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
             CompactionDescriptor compaction = WALEdit.getCompaction(cell);
@@ -1952,7 +1999,7 @@ public class WALSplitter {
     @Override
     public List<Path> finishWritingAndClose() throws IOException {
       try {
-        if (!finishWriting()) {
+        if (!finishWriting(false)) {
           return null;
         }
         if (hasEditsInDisablingOrDisabledTables) {
@@ -2038,6 +2085,26 @@ public class WALSplitter {
     @Override
     public int getNumberOfRecoveredRegions() {
       return this.recoveredRegions.size();
+    }
+
+    private boolean isTableDisabledOrDisabling(TableName tableName) {
+      if (csm == null)
+        return false; // we can't get state without CoordinatedStateManager
+      if (tableName.isSystemTable())
+        return false; // assume that system tables never can be disabled
+      TableState tableState = tableStatesCache.get(tableName);
+      if (tableState == null) {
+        try {
+          tableState =
+              MetaTableAccessor.getTableState(csm.getServer().getConnection(), tableName);
+          if (tableState != null)
+            tableStatesCache.put(tableName, tableState);
+        } catch (IOException e) {
+          LOG.warn("State is not accessible for table " + tableName, e);
+        }
+      }
+      return tableState != null && tableState
+          .inStates(TableState.State.DISABLED, TableState.State.DISABLING);
     }
 
     /**
@@ -2135,34 +2202,6 @@ public class WALSplitter {
     public final long nonce;
   }
 
- /**
-  * Tag original sequence number for each edit to be replayed
-  * @param seqId
-  * @param cell
-  */
-  private static Cell tagReplayLogSequenceNumber(long seqId, Cell cell) {
-    // Tag puts with original sequence number if there is no LOG_REPLAY_TAG yet
-    boolean needAddRecoveryTag = true;
-    if (cell.getTagsLength() > 0) {
-      Tag tmpTag = Tag.getTag(cell.getTagsArray(), cell.getTagsOffset(), cell.getTagsLength(),
-        TagType.LOG_REPLAY_TAG_TYPE);
-      if (tmpTag != null) {
-        // found an existing log replay tag so reuse it
-        needAddRecoveryTag = false;
-      }
-    }
-    if (needAddRecoveryTag) {
-      List<Tag> newTags = new ArrayList<Tag>();
-      Tag replayTag = new Tag(TagType.LOG_REPLAY_TAG_TYPE, Bytes.toBytes(seqId));
-      newTags.add(replayTag);
-      if (cell.getTagsLength() > 0) {
-        newTags.addAll(Tag.asList(cell.getTagsArray(), cell.getTagsOffset(), cell.getTagsLength()));
-      }
-      return new TagRewriteCell(cell, Tag.fromList(newTags));
-    }
-    return cell;
-  }
-
   /**
    * This function is used to construct mutations from a WALEntry. It also reconstructs WALKey &
    * WALEdit from the passed in WALEntry
@@ -2170,12 +2209,11 @@ public class WALSplitter {
    * @param cells
    * @param logEntry pair of WALKey and WALEdit instance stores WALKey and WALEdit instances
    *          extracted from the passed in WALEntry.
-   * @param addLogReplayTag
    * @return list of Pair<MutationType, Mutation> to be replayed
    * @throws IOException
    */
   public static List<MutationReplay> getMutationsFromWALEntry(WALEntry entry, CellScanner cells,
-      Pair<WALKey, WALEdit> logEntry, boolean addLogReplayTag, Durability durability)
+      Pair<WALKey, WALEdit> logEntry, Durability durability)
           throws IOException {
 
     if (entry == null) {
@@ -2223,11 +2261,7 @@ public class WALSplitter {
       if (CellUtil.isDelete(cell)) {
         ((Delete) m).addDeleteMarker(cell);
       } else {
-        Cell tmpNewCell = cell;
-        if (addLogReplayTag) {
-          tmpNewCell = tagReplayLogSequenceNumber(replaySeqId, cell);
-        }
-        ((Put) m).add(tmpNewCell);
+        ((Put) m).add(cell);
       }
       m.setDurability(durability);
       previousCell = cell;

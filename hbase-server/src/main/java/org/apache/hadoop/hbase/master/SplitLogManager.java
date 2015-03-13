@@ -39,31 +39,31 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
-import org.apache.hadoop.hbase.Chore;
+import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.ScheduledChore;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.SplitLogCounters;
 import org.apache.hadoop.hbase.Stoppable;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.coordination.BaseCoordinatedStateManager;
 import org.apache.hadoop.hbase.coordination.SplitLogManagerCoordination;
 import org.apache.hadoop.hbase.coordination.SplitLogManagerCoordination.SplitLogManagerDetails;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
-import org.apache.hadoop.hbase.regionserver.SplitLogWorker;
-import org.apache.hadoop.hbase.wal.DefaultWALProvider;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.wal.DefaultWALProvider;
+import org.apache.hadoop.hbase.wal.WALFactory;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -75,8 +75,9 @@ import com.google.common.annotations.VisibleForTesting;
  * <p>SplitLogManager monitors the tasks that it creates using the
  * timeoutMonitor thread. If a task's progress is slow then
  * {@link SplitLogManagerCoordination#checkTasks} will take away the
- * task from the owner {@link SplitLogWorker} and the task will be up for grabs again. When the
- * task is done then it is deleted by SplitLogManager.
+ * task from the owner {@link org.apache.hadoop.hbase.regionserver.SplitLogWorker} 
+ * and the task will be up for grabs again. When the task is done then it is 
+ * deleted by SplitLogManager.
  *
  * <p>Clients call {@link #splitLogDistributed(Path)} to split a region server's
  * log files. The caller thread waits in this method until all the log files
@@ -103,6 +104,7 @@ public class SplitLogManager {
 
   private final Stoppable stopper;
   private final Configuration conf;
+  private final ChoreService choreService;
 
   public static final int DEFAULT_UNASSIGNED_TIMEOUT = (3 * 60 * 1000); // 3 min
 
@@ -139,6 +141,7 @@ public class SplitLogManager {
     this.server = server;
     this.conf = conf;
     this.stopper = stopper;
+    this.choreService = new ChoreService(serverName.toString() + "_splitLogManager_");
     if (server.getCoordinatedStateManager() != null) {
       SplitLogManagerCoordination coordination =
           ((BaseCoordinatedStateManager) server.getCoordinatedStateManager())
@@ -146,8 +149,8 @@ public class SplitLogManager {
       Set<String> failedDeletions = Collections.synchronizedSet(new HashSet<String>());
       SplitLogManagerDetails details =
           new SplitLogManagerDetails(tasks, master, failedDeletions, serverName);
-      coordination.init();
       coordination.setDetails(details);
+      coordination.init();
       // Determine recovery mode
     }
     this.unassignedTimeout =
@@ -155,8 +158,7 @@ public class SplitLogManager {
     this.timeoutMonitor =
         new TimeoutMonitor(conf.getInt("hbase.splitlog.manager.timeoutmonitor.period", 1000),
             stopper);
-    Threads.setDaemonThreadRunning(timeoutMonitor.getThread(), serverName
-        + ".splitLogManagerTimeoutMonitor");
+    choreService.scheduleChore(timeoutMonitor);
   }
 
   private FileStatus[] getFileList(List<Path> logDirs, PathFilter filter) throws IOException {
@@ -165,7 +167,7 @@ public class SplitLogManager {
 
   /**
    * Get a list of paths that need to be split given a set of server-specific directories and
-   * optinally  a filter.
+   * optionally  a filter.
    *
    * See {@link DefaultWALProvider#getServerNameFromWALDirectoryName} for more info on directory
    * layout.
@@ -529,8 +531,11 @@ public class SplitLogManager {
   }
 
   public void stop() {
+    if (choreService != null) {
+      choreService.shutdown();
+    }
     if (timeoutMonitor != null) {
-      timeoutMonitor.interrupt();
+      timeoutMonitor.cancel(true);
     }
   }
 
@@ -684,11 +689,11 @@ public class SplitLogManager {
   /**
    * Periodically checks all active tasks and resubmits the ones that have timed out
    */
-  private class TimeoutMonitor extends Chore {
+  private class TimeoutMonitor extends ScheduledChore {
     private long lastLog = 0;
 
     public TimeoutMonitor(final int period, Stoppable stopper) {
-      super("SplitLogManager Timeout Monitor", period, stopper);
+      super("SplitLogManager Timeout Monitor", stopper, period);
     }
 
     @Override

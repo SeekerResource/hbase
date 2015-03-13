@@ -21,10 +21,8 @@ package org.apache.hadoop.hbase.regionserver;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
@@ -45,19 +43,20 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.io.hfile.LruBlockCache;
 import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
-import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.io.hfile.CacheConfig;
+import org.apache.hadoop.hbase.io.hfile.LruBlockCache;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.PairOfSameType;
+import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.Before;
@@ -248,7 +247,7 @@ public class TestSplitTransaction {
         assertTrue(count > 0 && count != rowcount);
         daughtersRowCount += count;
       } finally {
-        HRegion.closeHRegion(openRegion);
+        HBaseTestingUtility.closeRegionAndWAL(openRegion);
       }
     }
     assertEquals(rowcount, daughtersRowCount);
@@ -332,7 +331,7 @@ public class TestSplitTransaction {
         assertTrue(count > 0 && count != rowcount);
         daughtersRowCount += count;
       } finally {
-        HRegion.closeHRegion(openRegion);
+        HBaseTestingUtility.closeRegionAndWAL(openRegion);
       }
     }
     assertEquals(rowcount, daughtersRowCount);
@@ -359,7 +358,7 @@ public class TestSplitTransaction {
       List<Cell> kvs = new ArrayList<Cell>();
       boolean hasNext = true;
       while (hasNext) {
-        hasNext = scanner.next(kvs);
+        hasNext = NextState.hasMoreValues(scanner.next(kvs));
         if (!kvs.isEmpty()) rowcount++;
       }
     } finally {
@@ -376,8 +375,9 @@ public class TestSplitTransaction {
     HColumnDescriptor hcd = new HColumnDescriptor(CF);
     htd.addFamily(hcd);
     HRegionInfo hri = new HRegionInfo(htd.getTableName(), STARTROW, ENDROW);
-    HRegion r = HRegion.createHRegion(hri, testdir, TEST_UTIL.getConfiguration(), htd);
-    HRegion.closeHRegion(r);
+    HRegion r = HBaseTestingUtility.createRegionAndWAL(hri, testdir, TEST_UTIL.getConfiguration(),
+        htd);
+    HBaseTestingUtility.closeRegionAndWAL(r);
     return HRegion.openHRegion(testdir, hri, htd, wals.getWAL(hri.getEncodedNameAsBytes()),
       TEST_UTIL.getConfiguration());
   }

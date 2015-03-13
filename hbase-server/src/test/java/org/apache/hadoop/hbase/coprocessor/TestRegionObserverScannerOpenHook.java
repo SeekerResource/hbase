@@ -42,7 +42,6 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.IsolationLevel;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
@@ -60,6 +59,7 @@ import org.apache.hadoop.hbase.regionserver.ScanType;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreScanner;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionThroughputController;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -151,7 +151,8 @@ public class TestRegionObserverScannerOpenHook {
     }
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     Path path = new Path(DIR + callingMethod);
-    HRegion r = HRegion.createHRegion(info, path, conf, htd);
+    WAL wal = HBaseTestingUtility.createWal(conf, path, info);
+    HRegion r = HRegion.createHRegion(info, path, conf, htd, wal);
     // this following piece is a hack. currently a coprocessorHost
     // is secretly loaded at OpenRegionHandler. we don't really
     // start a region server here, so just manually create cphost
@@ -183,6 +184,7 @@ public class TestRegionObserverScannerOpenHook {
     assertNull(
       "Got an unexpected number of rows - no data should be returned with the NoDataFromScan coprocessor. Found: "
           + r, r.listCells());
+    HBaseTestingUtility.closeRegionAndWAL(region);
   }
 
   @Test
@@ -208,6 +210,7 @@ public class TestRegionObserverScannerOpenHook {
     assertNull(
       "Got an unexpected number of rows - no data should be returned with the NoDataFromScan coprocessor. Found: "
           + r, r.listCells());
+    HBaseTestingUtility.closeRegionAndWAL(region);
   }
 
   /*
@@ -227,9 +230,11 @@ public class TestRegionObserverScannerOpenHook {
       if (compactionStateChangeLatch == null) compactionStateChangeLatch = new CountDownLatch(1);
       return compactionStateChangeLatch;
     }
+
     @Override
-    public boolean compact(CompactionContext compaction, Store store) throws IOException {
-      boolean ret = super.compact(compaction, store);
+    public boolean compact(CompactionContext compaction, Store store,
+        CompactionThroughputController throughputController) throws IOException {
+      boolean ret = super.compact(compaction, store, throughputController);
       if (ret) compactionStateChangeLatch.countDown();
       return ret;
     }
@@ -259,13 +264,12 @@ public class TestRegionObserverScannerOpenHook {
     Admin admin = UTIL.getHBaseAdmin();
     admin.createTable(desc);
 
-    Table table = new HTable(conf, desc.getTableName());
+    Table table = UTIL.getConnection().getTable(desc.getTableName());
 
     // put a row and flush it to disk
     Put put = new Put(ROW);
     put.add(A, A, A);
     table.put(put);
-    table.flushCommits();
 
     HRegionServer rs = UTIL.getRSForFirstRegionInTable(desc.getTableName());
     List<HRegion> regions = rs.getOnlineRegions(desc.getTableName());
@@ -279,7 +283,6 @@ public class TestRegionObserverScannerOpenHook {
     put = new Put(Bytes.toBytes("anotherrow"));
     put.add(A, A, A);
     table.put(put);
-    table.flushCommits();
     admin.flushRegion(region.getRegionName());
 
     // run a compaction, which normally would should get rid of the data

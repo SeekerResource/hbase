@@ -61,6 +61,7 @@ import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.VerySlowRegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -466,7 +467,7 @@ public class TestAtomicOperation {
               Scan s = new Scan(row);
               RegionScanner rs = region.getScanner(s);
               List<Cell> r = new ArrayList<Cell>();
-              while(rs.next(r));
+              while(NextState.hasMoreValues(rs.next(r)));
               rs.close();
               if (r.size() != 1) {
                 LOG.debug(r);
@@ -538,8 +539,9 @@ public class TestAtomicOperation {
     final String tableName = "testPutAndCheckAndPut";
     Configuration conf = TEST_UTIL.getConfiguration();
     conf.setClass(HConstants.REGION_IMPL, MockHRegion.class, HeapSize.class);
-    final MockHRegion region = (MockHRegion) TEST_UTIL.createLocalHRegion(Bytes.toBytes(tableName),
-        null, null, tableName, conf, false, Durability.SYNC_WAL, null, Bytes.toBytes(family));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(tableName))
+        .addFamily(new HColumnDescriptor(family));
+    final MockHRegion region = (MockHRegion) TEST_UTIL.createLocalHRegion(htd, null, null);
 
     Put[] puts = new Put[1];
     Put put = new Put(Bytes.toBytes("r1"));
@@ -613,11 +615,11 @@ public class TestAtomicOperation {
     }
 
     @Override
-    public RowLock getRowLock(final byte[] row, boolean waitForLock) throws IOException {
+    public RowLock getRowLockInternal(final byte[] row, boolean waitForLock) throws IOException {
       if (testStep == TestStep.CHECKANDPUT_STARTED) {
         latch.countDown();
       }
-      return new WrappedRowLock(super.getRowLock(row, waitForLock));
+      return new WrappedRowLock(super.getRowLockInternal(row, waitForLock));
     }
     
     public class WrappedRowLock extends RowLock {

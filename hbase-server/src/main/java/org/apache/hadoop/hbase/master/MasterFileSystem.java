@@ -239,6 +239,11 @@ public class MasterFileSystem {
           return serverNames;
         }
         for (FileStatus status : logFolders) {
+          FileStatus[] curLogFiles = FSUtils.listStatus(this.fs, status.getPath(), null);
+          if (curLogFiles == null || curLogFiles.length == 0) {
+            // Empty log folder. No recovery needed
+            continue;
+          }
           final ServerName serverName = DefaultWALProvider.getServerNameFromWALDirectoryName(
               status.getPath());
           if (null == serverName) {
@@ -466,7 +471,7 @@ public class MasterFileSystem {
     // we should get them from registry.
     FSTableDescriptors fsd = new FSTableDescriptors(c, fs, rd);
     fsd.createTableDescriptor(
-        new TableDescriptor(fsd.get(TableName.META_TABLE_NAME), TableState.State.ENABLING));
+        new TableDescriptor(fsd.get(TableName.META_TABLE_NAME)));
 
     return rd;
   }
@@ -508,9 +513,9 @@ public class MasterFileSystem {
       HRegionInfo metaHRI = new HRegionInfo(HRegionInfo.FIRST_META_REGIONINFO);
       HTableDescriptor metaDescriptor = new FSTableDescriptors(c).get(TableName.META_TABLE_NAME);
       setInfoFamilyCachingForMeta(metaDescriptor, false);
-      HRegion meta = HRegion.createHRegion(metaHRI, rd, c, metaDescriptor);
+      HRegion meta = HRegion.createHRegion(metaHRI, rd, c, metaDescriptor, null);
       setInfoFamilyCachingForMeta(metaDescriptor, true);
-      HRegion.closeHRegion(meta);
+      meta.close();
     } catch (IOException e) {
         e = e instanceof RemoteException ?
                 ((RemoteException)e).unwrapRemoteException() : e;

@@ -19,6 +19,10 @@
 
 package org.apache.hadoop.hbase.filter;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,42 +30,44 @@ import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter.ReturnCode;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
-
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-
 import org.junit.experimental.categories.Category;
 
 @Category({FilterTests.class, SmallTests.class})
 public class TestDependentColumnFilter {
   private final Log LOG = LogFactory.getLog(this.getClass());
   private static final byte[][] ROWS = {
-	  Bytes.toBytes("test1"),Bytes.toBytes("test2")
+    Bytes.toBytes("test1"),Bytes.toBytes("test2")
   };
   private static final byte[][] FAMILIES = {
-	  Bytes.toBytes("familyOne"),Bytes.toBytes("familyTwo")
+    Bytes.toBytes("familyOne"),Bytes.toBytes("familyTwo")
   };
   private static final long STAMP_BASE = System.currentTimeMillis();
   private static final long[] STAMPS = {
-	  STAMP_BASE-100, STAMP_BASE-200, STAMP_BASE-300
+    STAMP_BASE-100, STAMP_BASE-200, STAMP_BASE-300
   };
   private static final byte[] QUALIFIER = Bytes.toBytes("qualifier");
   private static final byte[][] BAD_VALS = {
-	  Bytes.toBytes("bad1"), Bytes.toBytes("bad2"), Bytes.toBytes("bad3")
+    Bytes.toBytes("bad1"), Bytes.toBytes("bad2"), Bytes.toBytes("bad3")
   };
   private static final byte[] MATCH_VAL = Bytes.toBytes("match");
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
@@ -81,14 +87,14 @@ public class TestDependentColumnFilter {
     hcd1.setMaxVersions(3);
     htd.addFamily(hcd1);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    this.region = HRegion.createHRegion(info, TEST_UTIL.getDataTestDir(),
-      TEST_UTIL.getConfiguration(), htd);
+    this.region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+        TEST_UTIL.getConfiguration(), htd);
     addData();
   }
 
   @After
   public void tearDown() throws Exception {
-    HRegion.closeHRegion(this.region);
+    HBaseTestingUtility.closeRegionAndWAL(this.region);
   }
 
   private void addData() throws IOException {
@@ -119,14 +125,14 @@ public class TestDependentColumnFilter {
   }
 
   private List<KeyValue> makeTestVals() {
-	List<KeyValue> testVals = new ArrayList<KeyValue>();
-	testVals.add(new KeyValue(ROWS[0], FAMILIES[0], QUALIFIER, STAMPS[0], BAD_VALS[0]));
-	testVals.add(new KeyValue(ROWS[0], FAMILIES[0], QUALIFIER, STAMPS[1], BAD_VALS[1]));
-	testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[1], BAD_VALS[2]));
-	testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[0], MATCH_VAL));
-	testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[2], BAD_VALS[2]));
+    List<KeyValue> testVals = new ArrayList<KeyValue>();
+    testVals.add(new KeyValue(ROWS[0], FAMILIES[0], QUALIFIER, STAMPS[0], BAD_VALS[0]));
+    testVals.add(new KeyValue(ROWS[0], FAMILIES[0], QUALIFIER, STAMPS[1], BAD_VALS[1]));
+    testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[1], BAD_VALS[2]));
+    testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[0], MATCH_VAL));
+    testVals.add(new KeyValue(ROWS[0], FAMILIES[1], QUALIFIER, STAMPS[2], BAD_VALS[2]));
 
-	return testVals;
+    return testVals;
   }
 
   /**
@@ -145,7 +151,7 @@ public class TestDependentColumnFilter {
     int i = 0;
     int cells = 0;
     for (boolean done = true; done; i++) {
-      done = scanner.next(results);
+      done = NextState.hasMoreValues(scanner.next(results));
       Arrays.sort(results.toArray(new KeyValue[results.size()]),
           KeyValue.COMPARATOR);
       LOG.info("counter=" + i + ", " + results);

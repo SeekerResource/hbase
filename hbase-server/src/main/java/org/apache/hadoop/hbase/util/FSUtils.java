@@ -64,7 +64,6 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.master.RegionPlacementMaintainer;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
@@ -73,7 +72,6 @@ import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSHedgedReadMetrics;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
-import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.ipc.RemoteException;
@@ -102,6 +100,45 @@ public abstract class FSUtils {
 
   protected FSUtils() {
     super();
+  }
+
+  /*
+   * Sets storage policy for given path according to config setting
+   * @param fs
+   * @param conf
+   * @param path the Path whose storage policy is to be set
+   * @param policyKey
+   * @param defaultPolicy
+   */
+  public static void setStoragePolicy(final FileSystem fs, final Configuration conf,
+      final Path path, final String policyKey, final String defaultPolicy) {
+    String storagePolicy = conf.get(policyKey, defaultPolicy).toUpperCase();
+    if (!storagePolicy.equals(defaultPolicy) &&
+        fs instanceof DistributedFileSystem) {
+      DistributedFileSystem dfs = (DistributedFileSystem)fs;
+      Class<? extends DistributedFileSystem> dfsClass = dfs.getClass();
+      Method m = null;
+      try {
+        m = dfsClass.getDeclaredMethod("setStoragePolicy",
+            new Class<?>[] { Path.class, String.class });
+        m.setAccessible(true);
+      } catch (NoSuchMethodException e) {
+        LOG.info("FileSystem doesn't support"
+            + " setStoragePolicy; --HDFS-7228 not available");
+      } catch (SecurityException e) {
+        LOG.info("Doesn't have access to setStoragePolicy on "
+            + "FileSystems --HDFS-7228 not available", e);
+        m = null; // could happen on setAccessible()
+      }
+      if (m != null) {
+        try {
+          m.invoke(dfs, path, storagePolicy);
+          LOG.info("set " + storagePolicy + " for " + path);
+        } catch (Exception e) {
+          LOG.warn("Unable to set " + storagePolicy + " for " + path, e);
+        }
+      }
+    }
   }
 
   /**
@@ -182,6 +219,21 @@ public abstract class FSUtils {
   public static boolean deleteDirectory(final FileSystem fs, final Path dir)
   throws IOException {
     return fs.exists(dir) && fs.delete(dir, true);
+  }
+
+  /**
+   * Delete the region directory if exists.
+   * @param conf
+   * @param hri
+   * @return True if deleted the region directory.
+   * @throws IOException
+   */
+  public static boolean deleteRegionDir(final Configuration conf, final HRegionInfo hri)
+  throws IOException {
+    Path rootDir = getRootDir(conf);
+    FileSystem fs = rootDir.getFileSystem(conf);
+    return deleteDirectory(fs,
+      new Path(getTableDir(rootDir, hri.getTable()), hri.getEncodedName()));
   }
 
   /**
@@ -1152,7 +1204,7 @@ public abstract class FSUtils {
     private List<String> blacklist;
 
     /**
-     * Create a filter on the give filesystem with the specified blacklist
+     * Create a filter on the givem filesystem with the specified blacklist
      * @param fs filesystem to filter
      * @param directoryNameBlackList list of the names of the directories to filter. If
      *          <tt>null</tt>, all directories are returned
@@ -1510,6 +1562,9 @@ public abstract class FSUtils {
       FileStatus[] familyDirs = fs.listStatus(dd, familyFilter);
       for (FileStatus familyDir : familyDirs) {
         Path family = familyDir.getPath();
+        if (family.getName().equals(HConstants.RECOVERED_EDITS_DIR)) {
+          continue;
+        }
         // now in family, iterate over the StoreFiles and
         // put in map
         FileStatus[] familyStatus = fs.listStatus(family);
@@ -1708,7 +1763,7 @@ public abstract class FSUtils {
    * This function is to scan the root path of the file system to get the
    * degree of locality for each region on each of the servers having at least
    * one block of that region.
-   * This is used by the tool {@link RegionPlacementMaintainer}
+   * This is used by the tool {@link org.apache.hadoop.hbase.master.RegionPlacementMaintainer}
    *
    * @param conf
    *          the configuration to use

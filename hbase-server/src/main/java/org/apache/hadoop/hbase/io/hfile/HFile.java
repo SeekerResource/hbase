@@ -55,6 +55,7 @@ import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
+import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.BytesBytesPair;
@@ -532,6 +533,47 @@ public class HFile {
   }
 
   /**
+   * Returns true if the specified file has a valid HFile Trailer.
+   * @param fs filesystem
+   * @param path Path to file to verify
+   * @return true if the file has a valid HFile Trailer, otherwise false
+   * @throws IOException if failed to read from the underlying stream
+   */
+  public static boolean isHFileFormat(final FileSystem fs, final Path path) throws IOException {
+    return isHFileFormat(fs, fs.getFileStatus(path));
+  }
+
+  /**
+   * Returns true if the specified file has a valid HFile Trailer.
+   * @param fs filesystem
+   * @param fileStatus the file to verify
+   * @return true if the file has a valid HFile Trailer, otherwise false
+   * @throws IOException if failed to read from the underlying stream
+   */
+  public static boolean isHFileFormat(final FileSystem fs, final FileStatus fileStatus)
+      throws IOException {
+    final Path path = fileStatus.getPath();
+    final long size = fileStatus.getLen();
+    FSDataInputStreamWrapper fsdis = new FSDataInputStreamWrapper(fs, path);
+    try {
+      boolean isHBaseChecksum = fsdis.shouldUseHBaseChecksum();
+      assert !isHBaseChecksum; // Initially we must read with FS checksum.
+      FixedFileTrailer.readFromStream(fsdis.getStream(isHBaseChecksum), size);
+      return true;
+    } catch (IllegalArgumentException e) {
+      return false;
+    } catch (IOException e) {
+      throw e;
+    } finally {
+      try {
+        fsdis.close();
+      } catch (Throwable t) {
+        LOG.warn("Error closing fsdis FSDataInputStreamWrapper: " + path, t);
+      }
+    }
+  }
+
+  /**
    * Metadata for this file. Conjured by the writer. Read in by the reader.
    */
   public static class FileInfo implements SortedMap<byte[], byte[]> {
@@ -540,6 +582,7 @@ public class HFile {
     static final byte [] LASTKEY = Bytes.toBytes(RESERVED_PREFIX + "LASTKEY");
     static final byte [] AVG_KEY_LEN = Bytes.toBytes(RESERVED_PREFIX + "AVG_KEY_LEN");
     static final byte [] AVG_VALUE_LEN = Bytes.toBytes(RESERVED_PREFIX + "AVG_VALUE_LEN");
+    static final byte [] CREATE_TIME_TS = Bytes.toBytes(RESERVED_PREFIX + "CREATE_TIME_TS");
     static final byte [] COMPARATOR = Bytes.toBytes(RESERVED_PREFIX + "COMPARATOR");
     static final byte [] TAGS_COMPRESSED = Bytes.toBytes(RESERVED_PREFIX + "TAGS_COMPRESSED");
     public static final byte [] MAX_TAGS_LEN = Bytes.toBytes(RESERVED_PREFIX + "MAX_TAGS_LEN");
@@ -668,7 +711,7 @@ public class HFile {
         bbpBuilder.setSecond(ByteStringer.wrap(e.getValue()));
         builder.addMapEntry(bbpBuilder.build());
       }
-      out.write(ProtobufUtil.PB_MAGIC);
+      out.write(ProtobufMagic.PB_MAGIC);
       builder.build().writeDelimitedTo(out);
     }
 

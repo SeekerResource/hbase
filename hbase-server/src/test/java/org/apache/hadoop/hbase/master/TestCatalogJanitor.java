@@ -38,6 +38,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -53,7 +54,6 @@ import org.apache.hadoop.hbase.TableDescriptor;
 import org.apache.hadoop.hbase.TableDescriptors;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
-import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.HConnectionTestingUtility;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.TableState;
@@ -200,6 +200,11 @@ public class TestCatalogJanitor {
     @Override
     public void stop(String why) {
     }
+
+    @Override
+    public ChoreService getChoreService() {
+      return null;
+    }
   }
 
   /**
@@ -232,6 +237,11 @@ public class TestCatalogJanitor {
 
     @Override
     public ExecutorService getExecutorService() {
+      return null;
+    }
+
+    @Override
+    public ChoreService getChoreService() {
       return null;
     }
 
@@ -458,6 +468,18 @@ public class TestCatalogJanitor {
       // Auto-generated method stub
       return false;
     }
+
+    @Override
+    public long getLastMajorCompactionTimestamp(TableName table) throws IOException {
+      // Auto-generated method stub
+      return 0;
+    }
+
+    @Override
+    public long getLastMajorCompactionTimestampForRegion(byte[] regionName) throws IOException {
+      // Auto-generated method stub
+      return 0;
+    }
   }
 
   @Test
@@ -632,7 +654,7 @@ public class TestCatalogJanitor {
     assertTrue(janitor.cleanParent(parent, regions.get(parent)));
 
     services.stop("test finished");
-    janitor.join();
+    janitor.cancel(true);
   }
 
   /**
@@ -700,7 +722,7 @@ public class TestCatalogJanitor {
     assertEquals(2, janitor.scan());
 
     services.stop("test finished");
-    janitor.join();
+    janitor.cancel(true);
   }
 
   /**
@@ -863,7 +885,7 @@ public class TestCatalogJanitor {
     FSUtils.delete(fs, rootdir, true);
     services.stop("Test finished");
     server.stop("Test finished");
-    janitor.join();
+    janitor.cancel(true);
   }
 
   /**
@@ -948,7 +970,7 @@ public class TestCatalogJanitor {
     // cleanup
     services.stop("Test finished");
     server.stop("shutdown");
-    janitor.join();
+    janitor.cancel(true);
   }
 
   private FileStatus[] addMockStoreFiles(int count, MasterServices services, Path storedir)
@@ -1021,8 +1043,7 @@ public class TestCatalogJanitor {
   }
 
   private TableDescriptor createTableDescriptor() {
-    TableDescriptor htd = new TableDescriptor(createHTableDescriptor(), TableState.State.ENABLED);
-    return htd;
+    return new TableDescriptor(createHTableDescriptor());
   }
 
   private MultiResponse buildMultiResponse(MultiRequest req) {

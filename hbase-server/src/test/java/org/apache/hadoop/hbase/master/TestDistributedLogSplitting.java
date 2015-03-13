@@ -76,6 +76,7 @@ import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.NonceGenerator;
 import org.apache.hadoop.hbase.client.PerClientRandomNonceGenerator;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.RetriesExhaustedWithDetailsException;
 import org.apache.hadoop.hbase.client.Table;
@@ -91,11 +92,6 @@ import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
-import org.apache.hadoop.hbase.wal.DefaultWALProvider;
-import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
-import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -104,6 +100,10 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.MasterThread;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.wal.DefaultWALProvider;
+import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
@@ -261,7 +261,15 @@ public class TestDistributedLogSplitting {
       Path editsdir =
         WALSplitter.getRegionDirRecoveredEditsDir(HRegion.getRegionDir(tdir, hri.getEncodedName()));
       LOG.debug("checking edits dir " + editsdir);
-      FileStatus[] files = fs.listStatus(editsdir);
+      FileStatus[] files = fs.listStatus(editsdir, new PathFilter() {
+        @Override
+        public boolean accept(Path p) {
+          if (WALSplitter.isSequenceIdFile(p)) {
+            return false;
+          }
+          return true;
+        }
+      });
       assertTrue("edits dir should have more than a single file in it. instead has " + files.length,
           files.length > 1);
       for (int i = 0; i < files.length; i++) {
@@ -799,6 +807,7 @@ public class TestDistributedLogSplitting {
 
     LOG.info("Disabling table\n");
     TEST_UTIL.getHBaseAdmin().disableTable(TableName.valueOf("disableTable"));
+    TEST_UTIL.waitTableDisabled(TableName.valueOf("disableTable").getName());
 
     // abort RS
     LOG.info("Aborting region server: " + hrs.getServerName());
@@ -842,7 +851,15 @@ public class TestDistributedLogSplitting {
         WALSplitter.getRegionDirRecoveredEditsDir(HRegion.getRegionDir(tdir, hri.getEncodedName()));
       LOG.debug("checking edits dir " + editsdir);
       if(!fs.exists(editsdir)) continue;
-      FileStatus[] files = fs.listStatus(editsdir);
+      FileStatus[] files = fs.listStatus(editsdir, new PathFilter() {
+        @Override
+        public boolean accept(Path p) {
+          if (WALSplitter.isSequenceIdFile(p)) {
+            return false;
+          }
+          return true;
+        }
+      });
       if(files != null) {
         for(FileStatus file : files) {
           int c = countWAL(file.getPath(), fs, conf);
@@ -921,7 +938,6 @@ public class TestDistributedLogSplitting {
       if (key == null || key.length == 0) {
         key = new byte[] { 0, 0, 0, 0, 1 };
       }
-      ht.setAutoFlushTo(true);
       Put put = new Put(key);
       put.add(Bytes.toBytes("family"), Bytes.toBytes("c1"), new byte[]{'b'});
       ht.put(put);
@@ -1188,7 +1204,6 @@ public class TestDistributedLogSplitting {
     LOG.info("testSameVersionUpdatesRecovery");
     conf.setLong("hbase.regionserver.hlog.blocksize", 15 * 1024);
     conf.setBoolean(HConstants.DISTRIBUTED_LOG_REPLAY_KEY, true);
-    conf.setInt("hfile.format.version", 3);
     startCluster(NUM_RS);
     final AtomicLong sequenceId = new AtomicLong(100);
     final int NUM_REGIONS_TO_CREATE = 40;
@@ -1282,11 +1297,10 @@ public class TestDistributedLogSplitting {
     conf.setBoolean(HConstants.DISTRIBUTED_LOG_REPLAY_KEY, true);
     conf.setInt(HConstants.HREGION_MEMSTORE_FLUSH_SIZE, 30 * 1024);
     conf.setInt("hbase.hstore.compactionThreshold", 3);
-    conf.setInt("hfile.format.version", 3);
     startCluster(NUM_RS);
     final AtomicLong sequenceId = new AtomicLong(100);
     final int NUM_REGIONS_TO_CREATE = 40;
-    final int NUM_LOG_LINES = 1000;
+    final int NUM_LOG_LINES = 2000;
     // turn off load balancing to prevent regions from moving around otherwise
     // they will consume recovered.edits
     master.balanceSwitch(false);
@@ -1387,11 +1401,10 @@ public class TestDistributedLogSplitting {
     FileSystem fs = master.getMasterFileSystem().getFileSystem();
     Path tableDir = FSUtils.getTableDir(FSUtils.getRootDir(conf), TableName.valueOf("table"));
     List<Path> regionDirs = FSUtils.getRegionDirs(fs, tableDir);
-    WALSplitter.writeRegionOpenSequenceIdFile(fs, regionDirs.get(0) , 1L, 1000L);
-    // current SeqId file has seqid=1001
-    WALSplitter.writeRegionOpenSequenceIdFile(fs, regionDirs.get(0) , 1L, 1000L);
-    // current SeqId file has seqid=2001
-    assertEquals(3001, WALSplitter.writeRegionOpenSequenceIdFile(fs, regionDirs.get(0), 3L, 1000L));
+    long newSeqId = WALSplitter.writeRegionSequenceIdFile(fs, regionDirs.get(0), 1L, 1000L);
+    WALSplitter.writeRegionSequenceIdFile(fs, regionDirs.get(0) , 1L, 1000L);
+    assertEquals(newSeqId + 2000,
+      WALSplitter.writeRegionSequenceIdFile(fs, regionDirs.get(0), 3L, 1000L));
     
     Path editsdir = WALSplitter.getRegionDirRecoveredEditsDir(regionDirs.get(0));
     FileStatus[] files = FSUtils.listStatus(fs, editsdir, new PathFilter() {
@@ -1420,8 +1433,11 @@ public class TestDistributedLogSplitting {
     TableName table = TableName.valueOf(tname);
     byte [] family = Bytes.toBytes(fname);
     LOG.info("Creating table with " + nrs + " regions");
-    HTable ht = TEST_UTIL.createTable(table, family);
-    int numRegions = TEST_UTIL.createMultiRegions(conf, ht, family, nrs);
+    HTable ht = TEST_UTIL.createMultiRegionTable(table, family, nrs);
+    int numRegions = -1;
+    try (RegionLocator r = ht.getRegionLocator()) {
+      numRegions = r.getStartKeys().length;
+    }
     assertEquals(nrs, numRegions);
       LOG.info("Waiting for no more RIT\n");
     blockUntilNoRIT(zkw, master);
@@ -1613,11 +1629,11 @@ public class TestDistributedLogSplitting {
   /**
    * Load table with puts and deletes with expected values so that we can verify later
    */
-  private void prepareData(final HTable t, final byte[] f, final byte[] column) throws IOException {
-    t.setAutoFlushTo(false);
+  private void prepareData(final Table t, final byte[] f, final byte[] column) throws IOException {
     byte[] k = new byte[3];
 
     // add puts
+    List<Put> puts = new ArrayList<>();
     for (byte b1 = 'a'; b1 <= 'z'; b1++) {
       for (byte b2 = 'a'; b2 <= 'z'; b2++) {
         for (byte b3 = 'a'; b3 <= 'z'; b3++) {
@@ -1626,11 +1642,11 @@ public class TestDistributedLogSplitting {
           k[2] = b3;
           Put put = new Put(k);
           put.add(f, column, k);
-          t.put(put);
+          puts.add(put);
         }
       }
     }
-    t.flushCommits();
+    t.put(puts);
     // add deletes
     for (byte b3 = 'a'; b3 <= 'z'; b3++) {
       k[0] = 'a';
@@ -1639,7 +1655,6 @@ public class TestDistributedLogSplitting {
       Delete del = new Delete(k);
       t.delete(del);
     }
-    t.flushCommits();
   }
 
   private void waitForCounter(AtomicLong ctr, long oldval, long newval,

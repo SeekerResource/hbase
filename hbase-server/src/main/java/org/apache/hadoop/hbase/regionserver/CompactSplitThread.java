@@ -35,17 +35,20 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.conf.ConfigurationManager;
 import org.apache.hadoop.hbase.conf.PropagatingConfigurationObserver;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionThroughputController;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionThroughputControllerFactory;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.StringUtils;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 /**
@@ -72,6 +75,10 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
   // Configuration keys for merge threads
   public final static String MERGE_THREADS = "hbase.regionserver.thread.merge";
   public final static int MERGE_THREADS_DEFAULT = 1;
+
+  public static final String REGION_SERVER_REGION_SPLIT_LIMIT =
+      "hbase.regionserver.regionSplitLimit";
+  public static final int DEFAULT_REGION_SERVER_REGION_SPLIT_LIMIT= 1000;
   
   private final HRegionServer server;
   private final Configuration conf;
@@ -80,6 +87,8 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
   private final ThreadPoolExecutor shortCompactions;
   private final ThreadPoolExecutor splits;
   private final ThreadPoolExecutor mergePool;
+
+  private volatile CompactionThroughputController compactionThroughputController;
 
   /**
    * Splitting should not take place if the total number of regions exceed this.
@@ -93,8 +102,8 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
     super();
     this.server = server;
     this.conf = server.getConfiguration();
-    this.regionSplitLimit = conf.getInt("hbase.regionserver.regionSplitLimit",
-        Integer.MAX_VALUE);
+    this.regionSplitLimit = conf.getInt(REGION_SERVER_REGION_SPLIT_LIMIT,
+        DEFAULT_REGION_SERVER_REGION_SPLIT_LIMIT);
 
     int largeThreads = Math.max(1, conf.getInt(
         LARGE_COMPACTION_THREADS, LARGE_COMPACTION_THREADS_DEFAULT));
@@ -151,6 +160,10 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
             return t;
           }
         });
+
+    // compaction throughput controller
+    this.compactionThroughputController =
+        CompactionThroughputControllerFactory.create(server, conf);
   }
 
   @Override
@@ -168,31 +181,31 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
     queueLists.append("  LargeCompation Queue:\n");
     BlockingQueue<Runnable> lq = longCompactions.getQueue();
     Iterator<Runnable> it = lq.iterator();
-    while(it.hasNext()){
-      queueLists.append("    "+it.next().toString());
+    while (it.hasNext()) {
+      queueLists.append("    " + it.next().toString());
       queueLists.append("\n");
     }
 
-    if( shortCompactions != null ){
+    if (shortCompactions != null) {
       queueLists.append("\n");
       queueLists.append("  SmallCompation Queue:\n");
       lq = shortCompactions.getQueue();
       it = lq.iterator();
-      while(it.hasNext()){
-        queueLists.append("    "+it.next().toString());
+      while (it.hasNext()) {
+        queueLists.append("    " + it.next().toString());
         queueLists.append("\n");
       }
     }
-    
+
     queueLists.append("\n");
     queueLists.append("  Split Queue:\n");
     lq = splits.getQueue();
     it = lq.iterator();
-    while(it.hasNext()){
-      queueLists.append("    "+it.next().toString());
+    while (it.hasNext()) {
+      queueLists.append("    " + it.next().toString());
       queueLists.append("\n");
     }
-    
+
     queueLists.append("\n");
     queueLists.append("  Region Merge Queue:\n");
     lq = mergePool.getQueue();
@@ -413,8 +426,15 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
     return shortCompactions.getQueue().size();
   }
 
+  public int getSplitQueueSize() {
+    return splits.getQueue().size();
+  }
 
   private boolean shouldSplitRegion() {
+    if(server.getNumberOfOnlineRegions() > 0.9*regionSplitLimit) {
+      LOG.warn("Total number of regions is approaching the upper limit " + regionSplitLimit + ". "
+          + "Please consider taking a look at http://hbase.apache.org/book.html#ops.regionmgt");
+    }
     return (regionSplitLimit > server.getNumberOfOnlineRegions());
   }
 
@@ -497,7 +517,8 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
         // Note: please don't put single-compaction logic here;
         //       put it into region/store/etc. This is CST logic.
         long start = EnvironmentEdgeManager.currentTime();
-        boolean completed = region.compact(compaction, store);
+        boolean completed =
+            region.compact(compaction, store, compactionThroughputController);
         long now = EnvironmentEdgeManager.currentTime();
         LOG.info(((completed) ? "Completed" : "Aborted") + " compaction: " +
               this + "; duration=" + StringUtils.formatTimeDiff(now, start));
@@ -612,6 +633,13 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
       this.mergePool.setCorePoolSize(smallThreads);
     }
 
+    CompactionThroughputController old = this.compactionThroughputController;
+    if (old != null) {
+      old.stop("configuration change");
+    }
+    this.compactionThroughputController =
+        CompactionThroughputControllerFactory.create(server, newConf);
+
     // We change this atomically here instead of reloading the config in order that upstream
     // would be the only one with the flexibility to reload the config.
     this.conf.reloadConfiguration();
@@ -640,4 +668,10 @@ public class CompactSplitThread implements CompactionRequestor, PropagatingConfi
   public void deregisterChildren(ConfigurationManager manager) {
     // No children to register
   }
+
+  @VisibleForTesting
+  public CompactionThroughputController getCompactionThroughputController() {
+    return compactionThroughputController;
+  }
+
 }

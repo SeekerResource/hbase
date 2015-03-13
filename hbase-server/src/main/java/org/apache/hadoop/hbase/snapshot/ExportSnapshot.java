@@ -24,7 +24,6 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -53,17 +52,15 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.io.FileLink;
 import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.WALLink;
-import org.apache.hadoop.hbase.mapreduce.JobUtil;
 import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.protobuf.generated.SnapshotProtos.SnapshotFileInfo;
 import org.apache.hadoop.hbase.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.NullWritable;
-import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.JobContext;
@@ -72,7 +69,6 @@ import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.hbase.io.hadoopbackport.ThrottledInputStream;
@@ -157,12 +153,14 @@ public class ExportSnapshot extends Configured implements Tool {
       testFailures = conf.getBoolean(CONF_TEST_FAILURE, false);
 
       try {
+        conf.setBoolean("fs." + inputRoot.toUri().getScheme() + ".impl.disable.cache", true);
         inputFs = FileSystem.get(inputRoot.toUri(), conf);
       } catch (IOException e) {
         throw new IOException("Could not get the input FileSystem with root=" + inputRoot, e);
       }
 
       try {
+        conf.setBoolean("fs." + outputRoot.toUri().getScheme() + ".impl.disable.cache", true);
         outputFs = FileSystem.get(outputRoot.toUri(), conf);
       } catch (IOException e) {
         throw new IOException("Could not get the output FileSystem with root="+ outputRoot, e);
@@ -176,6 +174,12 @@ public class ExportSnapshot extends Configured implements Tool {
       for (Counter c : Counter.values()) {
         context.getCounter(c).increment(0);
       }
+    }
+
+    @Override
+    protected void cleanup(Context context) {
+      IOUtils.closeStream(inputFs);
+      IOUtils.closeStream(outputFs);
     }
 
     @Override
@@ -396,13 +400,14 @@ public class ExportSnapshot extends Configured implements Tool {
      * if the file is not found.
      */
     private FSDataInputStream openSourceFile(Context context, final SnapshotFileInfo fileInfo)
-        throws IOException {
+            throws IOException {
       try {
+        Configuration conf = context.getConfiguration();
         FileLink link = null;
         switch (fileInfo.getType()) {
           case HFILE:
             Path inputPath = new Path(fileInfo.getHfile());
-            link = new HFileLink(inputRoot, inputArchive, inputPath);
+            link = HFileLink.buildFromHFileLinkPattern(conf, inputPath);
             break;
           case WAL:
             String serverName = fileInfo.getWalServer();
@@ -423,11 +428,12 @@ public class ExportSnapshot extends Configured implements Tool {
     private FileStatus getSourceFileStatus(Context context, final SnapshotFileInfo fileInfo)
         throws IOException {
       try {
+        Configuration conf = context.getConfiguration();
         FileLink link = null;
         switch (fileInfo.getType()) {
           case HFILE:
             Path inputPath = new Path(fileInfo.getHfile());
-            link = new HFileLink(inputRoot, inputArchive, inputPath);
+            link = HFileLink.buildFromHFileLinkPattern(conf, inputPath);
             break;
           case WAL:
             link = new WALLink(inputRoot, fileInfo.getWalServer(), fileInfo.getWalName());
@@ -515,7 +521,7 @@ public class ExportSnapshot extends Configured implements Tool {
             if (storeFile.hasFileSize()) {
               size = storeFile.getFileSize();
             } else {
-              size = new HFileLink(conf, path).getFileStatus(fs).getLen();
+              size = HFileLink.buildFromHFileLinkPattern(conf, path).getFileStatus(fs).getLen();
             }
             files.add(new Pair<SnapshotFileInfo, Long>(fileInfo, size));
           }
@@ -857,8 +863,10 @@ public class ExportSnapshot extends Configured implements Tool {
       targetName = snapshotName;
     }
 
+    conf.setBoolean("fs." + inputRoot.toUri().getScheme() + ".impl.disable.cache", true);
     FileSystem inputFs = FileSystem.get(inputRoot.toUri(), conf);
     LOG.debug("inputFs=" + inputFs.getUri().toString() + " inputRoot=" + inputRoot);
+    conf.setBoolean("fs." + outputRoot.toUri().getScheme() + ".impl.disable.cache", true);
     FileSystem outputFs = FileSystem.get(outputRoot.toUri(), conf);
     LOG.debug("outputFs=" + outputFs.getUri().toString() + " outputRoot=" + outputRoot.toString());
 
@@ -952,6 +960,9 @@ public class ExportSnapshot extends Configured implements Tool {
       }
       outputFs.delete(outputSnapshotDir, true);
       return 1;
+    } finally {
+      IOUtils.closeStream(inputFs);
+      IOUtils.closeStream(outputFs);
     }
   }
 

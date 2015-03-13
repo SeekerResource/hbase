@@ -28,9 +28,10 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.MultithreadedTestUtil.RepeatingTestThread;
 import org.apache.hadoop.hbase.MultithreadedTestUtil.TestContext;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
@@ -88,8 +89,12 @@ public class TestAcidGuarantees implements Tool {
     conf.set(HConstants.HREGION_MEMSTORE_FLUSH_SIZE, String.valueOf(128*1024));
     // prevent aggressive region split
     conf.set(HConstants.HBASE_REGION_SPLIT_POLICY_KEY,
-      ConstantSizeRegionSplitPolicy.class.getName());
+            ConstantSizeRegionSplitPolicy.class.getName());
     util = new HBaseTestingUtility(conf);
+  }
+
+  public void setHBaseTestingUtil(HBaseTestingUtility util) {
+    this.util = util;
   }
 
   /**
@@ -108,7 +113,8 @@ public class TestAcidGuarantees implements Tool {
       super(ctx);
       this.targetRows = targetRows;
       this.targetFamilies = targetFamilies;
-      table = new HTable(ctx.getConf(), TABLE_NAME);
+      Connection connection = ConnectionFactory.createConnection(ctx.getConf());
+      table = connection.getTable(TABLE_NAME);
     }
     public void doAnAction() throws Exception {
       // Pick a random row to write into
@@ -143,7 +149,8 @@ public class TestAcidGuarantees implements Tool {
       super(ctx);
       this.targetRow = targetRow;
       this.targetFamilies = targetFamilies;
-      table = new HTable(ctx.getConf(), TABLE_NAME);
+      Connection connection = ConnectionFactory.createConnection(ctx.getConf());
+      table = connection.getTable(TABLE_NAME);
     }
 
     public void doAnAction() throws Exception {
@@ -200,7 +207,8 @@ public class TestAcidGuarantees implements Tool {
                            byte targetFamilies[][]) throws IOException {
       super(ctx);
       this.targetFamilies = targetFamilies;
-      table = new HTable(ctx.getConf(), TABLE_NAME);
+      Connection connection = ConnectionFactory.createConnection(ctx.getConf());
+      table = connection.getTable(TABLE_NAME);
     }
 
     public void doAnAction() throws Exception {

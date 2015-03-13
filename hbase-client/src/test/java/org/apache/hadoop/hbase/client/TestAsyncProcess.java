@@ -155,8 +155,8 @@ public class TestAsyncProcess {
           new RpcRetryingCallerFactory(conf), useGlobalErrors, new RpcControllerFactory(conf));
     }
 
-    public MyAsyncProcess(
-        ClusterConnection hc, Configuration conf, boolean useGlobalErrors, boolean dummy) {
+    public MyAsyncProcess(ClusterConnection hc, Configuration conf, boolean useGlobalErrors,
+        @SuppressWarnings("unused") boolean dummy) {
       super(hc, conf, new ThreadPoolExecutor(1, 20, 60, TimeUnit.SECONDS,
               new SynchronousQueue<Runnable>(), new CountingThreadFactory(new AtomicInteger())) {
         @Override
@@ -190,7 +190,7 @@ public class TestAsyncProcess {
             }
           });
 
-      return new RpcRetryingCaller<MultiResponse>(100, 10, 9) {
+      return new RpcRetryingCallerImpl<MultiResponse>(100, 10, 9) {
         @Override
         public MultiResponse callWithoutRetries(RetryingCallable<MultiResponse> callable,
                                                 int callTimeout)
@@ -208,7 +208,7 @@ public class TestAsyncProcess {
     }
   }
 
-  static class CallerWithFailure extends RpcRetryingCaller<MultiResponse>{
+  static class CallerWithFailure extends RpcRetryingCallerImpl<MultiResponse>{
 
     public CallerWithFailure() {
       super(100, 100, 9);
@@ -294,7 +294,7 @@ public class TestAsyncProcess {
         replicaCalls.incrementAndGet();
       }
 
-      return new RpcRetryingCaller<MultiResponse>(100, 10, 9) {
+      return new RpcRetryingCallerImpl<MultiResponse>(100, 10, 9) {
         @Override
         public MultiResponse callWithoutRetries(RetryingCallable<MultiResponse> callable, int callTimeout)
         throws IOException, RuntimeException {
@@ -644,26 +644,27 @@ public class TestAsyncProcess {
     NonceGenerator ng = Mockito.mock(NonceGenerator.class);
     Mockito.when(ng.getNonceGroup()).thenReturn(HConstants.NO_NONCE);
     Mockito.when(hc.getNonceGenerator()).thenReturn(ng);
+    Mockito.when(hc.getConfiguration()).thenReturn(conf);
     return hc;
   }
 
   @Test
   public void testHTablePutSuccess() throws Exception {
-    HTable ht = Mockito.mock(HTable.class);
+    BufferedMutatorImpl ht = Mockito.mock(BufferedMutatorImpl.class);
     ht.ap = new MyAsyncProcess(createHConnection(), conf, true);
 
     Put put = createPut(1, true);
 
     Assert.assertEquals(0, ht.getWriteBufferSize());
-    ht.put(put);
+    ht.mutate(put);
     Assert.assertEquals(0, ht.getWriteBufferSize());
   }
 
   private void doHTableFailedPut(boolean bufferOn) throws Exception {
-    HTable ht = new HTable();
-    MyAsyncProcess ap = new MyAsyncProcess(createHConnection(), conf, true);
-    ht.ap = ap;
-    ht.setAutoFlushTo(true);
+    ClusterConnection conn = createHConnection();
+    HTable ht = new HTable(conn, new BufferedMutatorParams(DUMMY_TABLE));
+    MyAsyncProcess ap = new MyAsyncProcess(conn, conf, true);
+    ht.mutator.ap = ap;
     if (bufferOn) {
       ht.setWriteBufferSize(1024L * 1024L);
     } else {
@@ -672,7 +673,7 @@ public class TestAsyncProcess {
 
     Put put = createPut(1, false);
 
-    Assert.assertEquals(0L, ht.currentWriteBufferSize);
+    Assert.assertEquals(0L, ht.mutator.currentWriteBufferSize);
     try {
       ht.put(put);
       if (bufferOn) {
@@ -681,7 +682,7 @@ public class TestAsyncProcess {
       Assert.fail();
     } catch (RetriesExhaustedException expected) {
     }
-    Assert.assertEquals(0L, ht.currentWriteBufferSize);
+    Assert.assertEquals(0L, ht.mutator.currentWriteBufferSize);
     // The table should have sent one request, maybe after multiple attempts
     AsyncRequestFuture ars = null;
     for (AsyncRequestFuture someReqs : ap.allReqs) {
@@ -708,14 +709,14 @@ public class TestAsyncProcess {
 
   @Test
   public void testHTableFailedPutAndNewPut() throws Exception {
-    HTable ht = new HTable();
-    MyAsyncProcess ap = new MyAsyncProcess(createHConnection(), conf, true);
-    ht.ap = ap;
-    ht.setAutoFlushTo(false);
-    ht.setWriteBufferSize(0);
+    ClusterConnection conn = createHConnection();
+    BufferedMutatorImpl mutator = new BufferedMutatorImpl(conn, null, null,
+        new BufferedMutatorParams(DUMMY_TABLE).writeBufferSize(0));
+    MyAsyncProcess ap = new MyAsyncProcess(conn, conf, true);
+    mutator.ap = ap;
 
     Put p = createPut(1, false);
-    ht.put(p);
+    mutator.mutate(p);
 
     ap.waitUntilDone(); // Let's do all the retries.
 
@@ -725,21 +726,22 @@ public class TestAsyncProcess {
     //  puts, we may raise an exception in the middle of the list. It's then up to the caller to
     //  manage what was inserted, what was tried but failed, and what was not even tried.
     p = createPut(1, true);
-    Assert.assertEquals(0, ht.writeAsyncBuffer.size());
+    Assert.assertEquals(0, mutator.getWriteBuffer().size());
     try {
-      ht.put(p);
+      mutator.mutate(p);
       Assert.fail();
     } catch (RetriesExhaustedException expected) {
     }
-    Assert.assertEquals("the put should not been inserted.", 0, ht.writeAsyncBuffer.size());
+    Assert.assertEquals("the put should not been inserted.", 0, mutator.getWriteBuffer().size());
   }
 
 
+/*
   @Test
   public void testWithNoClearOnFail() throws IOException {
     HTable ht = new HTable();
     ht.ap = new MyAsyncProcess(createHConnection(), conf, true);
-    ht.setAutoFlush(false);
+    ht.setAutoFlushTo(false);
 
     Put p = createPut(1, false);
     ht.put(p);
@@ -757,12 +759,13 @@ public class TestAsyncProcess {
     }
     Assert.assertEquals(1, ht.writeAsyncBuffer.size());
   }
+  */
 
   @Test
   public void testBatch() throws IOException, InterruptedException {
-    HTable ht = new HTable();
-    ht.connection = new MyConnectionImpl(conf);
-    ht.multiAp = new MyAsyncProcess(ht.connection, conf, false);
+    ClusterConnection conn = new MyConnectionImpl(conf);
+    HTable ht = new HTable(conn, new BufferedMutatorParams(DUMMY_TABLE));
+    ht.multiAp = new MyAsyncProcess(conn, conf, false);
 
     List<Put> puts = new ArrayList<Put>();
     puts.add(createPut(1, true));
@@ -791,26 +794,24 @@ public class TestAsyncProcess {
 
   @Test
   public void testErrorsServers() throws IOException {
-    HTable ht = new HTable();
     Configuration configuration = new Configuration(conf);
+    ClusterConnection conn = new MyConnectionImpl(configuration);
+    BufferedMutatorImpl mutator =
+        new BufferedMutatorImpl(conn, null, null, new BufferedMutatorParams(DUMMY_TABLE));
     configuration.setBoolean(ConnectionManager.RETRIES_BY_SERVER_KEY, true);
-    // set default writeBufferSize
-    ht.setWriteBufferSize(configuration.getLong("hbase.client.write.buffer", 2097152));
 
-    ht.connection = new MyConnectionImpl(configuration);
-    MyAsyncProcess ap = new MyAsyncProcess(ht.connection, configuration, true);
-    ht.ap = ap;
+    MyAsyncProcess ap = new MyAsyncProcess(conn, configuration, true);
+    mutator.ap = ap;
 
-    Assert.assertNotNull(ht.ap.createServerErrorTracker());
-    Assert.assertTrue(ht.ap.serverTrackerTimeout > 200);
-    ht.ap.serverTrackerTimeout = 1;
+    Assert.assertNotNull(mutator.ap.createServerErrorTracker());
+    Assert.assertTrue(mutator.ap.serverTrackerTimeout > 200);
+    mutator.ap.serverTrackerTimeout = 1;
 
     Put p = createPut(1, false);
-    ht.setAutoFlush(false);
-    ht.put(p);
+    mutator.mutate(p);
 
     try {
-      ht.flushCommits();
+      mutator.flush();
       Assert.fail();
     } catch (RetriesExhaustedWithDetailsException expected) {
     }
@@ -820,19 +821,18 @@ public class TestAsyncProcess {
 
   @Test
   public void testGlobalErrors() throws IOException {
-    HTable ht = new HTable();
-    ht.connection = new MyConnectionImpl(conf);
-    AsyncProcessWithFailure ap = new AsyncProcessWithFailure(ht.connection, conf);
-    ht.ap = ap;
+    ClusterConnection conn = new MyConnectionImpl(conf);
+    BufferedMutatorImpl mutator = (BufferedMutatorImpl) conn.getBufferedMutator(DUMMY_TABLE);
+    AsyncProcessWithFailure ap = new AsyncProcessWithFailure(conn, conf);
+    mutator.ap = ap;
 
-    Assert.assertNotNull(ht.ap.createServerErrorTracker());
+    Assert.assertNotNull(mutator.ap.createServerErrorTracker());
 
     Put p = createPut(1, true);
-    ht.setAutoFlush(false);
-    ht.put(p);
+    mutator.mutate(p);
 
     try {
-      ht.flushCommits();
+      mutator.flush();
       Assert.fail();
     } catch (RetriesExhaustedWithDetailsException expected) {
     }
@@ -859,13 +859,12 @@ public class TestAsyncProcess {
       gets.add(get);
     }
 
-    HTable ht = new HTable();
     MyConnectionImpl2 con = new MyConnectionImpl2(hrls);
-    ht.connection = con;
+    HTable ht = new HTable(con, new BufferedMutatorParams(DUMMY_TABLE));
     MyAsyncProcess ap = new MyAsyncProcess(con, conf, con.nbThreads);
     ht.multiAp = ap;
 
-    ht.batch(gets);
+    ht.batch(gets, new Object[gets.size()]);
 
     Assert.assertEquals(ap.nbActions.get(), NB_REGS);
     Assert.assertEquals("1 multi response per server", 2, ap.nbMultiResponse.get());

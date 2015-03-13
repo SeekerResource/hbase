@@ -187,7 +187,7 @@ possible configurations would overwhelm and obscure the important.
       A value of 0 means a single queue shared between all the handlers.
       A value of 1 means that each handler has its own queue.</description>
   </property>
-<property>
+  <property>
     <name>hbase.ipc.server.callqueue.read.ratio</name>
     <value>0</value>
     <description>Split the call queues into read and write queues.
@@ -329,8 +329,17 @@ possible configurations would overwhelm and obscure the important.
     <value>org.apache.hadoop.hbase.regionserver.IncreasingToUpperBoundRegionSplitPolicy</value>
     <description>
       A split policy determines when a region should be split. The various other split policies that
-      are available currently are ConstantSizeRegionSplitPolicy, DisabledRegionSplitPolicy, 
-      DelimitedKeyPrefixRegionSplitPolicy, KeyPrefixRegionSplitPolicy etc.  
+      are available currently are ConstantSizeRegionSplitPolicy, DisabledRegionSplitPolicy,
+      DelimitedKeyPrefixRegionSplitPolicy, KeyPrefixRegionSplitPolicy etc.
+    </description>
+  </property>
+  <property>
+    <name>hbase.regionserver.regionSplitLimit</name>
+    <value>1000</value>
+    <description>
+      Limit for the number of regions after which no more region splitting should take place.
+      This is not hard limit for the number of regions but acts as a guideline for the regionserver
+      to stop splitting after a certain limit. Default is set to 1000.
     </description>
   </property>
 
@@ -518,13 +527,19 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.client.scanner.caching</name>
-    <value>100</value>
-    <description>Number of rows that will be fetched when calling next
-    on a scanner if it is not served from (local, client) memory. Higher
-    caching values will enable faster scanners but will eat up more memory
-    and some calls of next may take longer and longer times when the cache is empty.
-    Do not set this value such that the time between invocations is greater
-    than the scanner timeout; i.e. hbase.client.scanner.timeout.period</description>
+    <value>2147483647</value>
+    <description>Number of rows that we try to fetch when calling next
+    on a scanner if it is not served from (local, client) memory. This configuration
+    works together with hbase.client.scanner.max.result.size to try and use the
+    network efficiently. The default value is Integer.MAX_VALUE by default so that
+    the network will fill the chunk size defined by hbase.client.scanner.max.result.size
+    rather than be limited by a particular number of rows since the size of rows varies
+    table to table. If you know ahead of time that you will not require more than a certain
+    number of rows from a scan, this configuration should be set to that row limit via
+    Scan#setCaching. Higher caching values will enable faster scanners but will eat up more
+    memory and some calls of next may take longer and longer times when the cache is empty.
+    Do not set this value such that the time between invocations is greater than the scanner
+    timeout; i.e. hbase.client.scanner.timeout.period</description>
   </property>
   <property>
     <name>hbase.client.keyvalue.maxsize</name>
@@ -549,7 +564,7 @@ possible configurations would overwhelm and obscure the important.
   <!--Miscellaneous configuration-->
   <property>
     <name>hbase.bulkload.retries.number</name>
-    <value>0</value>
+    <value>10</value>
     <description>Maximum retries.  This is maximum number of iterations
     to atomic bulk loads are attempted in the face of splitting operations
     0 means never give up.</description>
@@ -586,6 +601,19 @@ possible configurations would overwhelm and obscure the important.
     Memstore will be flushed to disk if size of the memstore
     exceeds this number of bytes.  Value is checked by a thread that runs
     every hbase.server.thread.wakefrequency.</description>
+  </property>
+  <property>
+    <name>hbase.hregion.percolumnfamilyflush.size.lower.bound</name>
+    <value>16777216</value>
+    <description>
+    If FlushLargeStoresPolicy is used, then every time that we hit the
+    total memstore limit, we find out all the column families whose memstores
+    exceed this value, and only flush them, while retaining the others whose
+    memstores are lower than this limit. If none of the families have their
+    memstore size more than this, all the memstores will be flushed
+    (just as usual). This value should be less than half of the total memstore
+    threshold (hbase.hregion.memstore.flush.size).
+    </description>
   </property>
   <property>
     <name>hbase.hregion.preclose.flush.size</name>
@@ -767,12 +795,12 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.regionserver.thread.compaction.throttle</name>
-    <value>2560</value>
+    <value>2684354560</value>
     <description>There are two different thread pools for compactions, one for large compactions and
       the other for small compactions. This helps to keep compaction of lean tables (such as
         <systemitem>hbase:meta</systemitem>) fast. If a compaction is larger than this threshold, it
       goes into the large compaction pool. In most cases, the default value is appropriate. Default:
-      2 x hbase.hstore.compaction.max x hbase.hregion.memstore.flush.size (which defaults to 128).
+      2 x hbase.hstore.compaction.max x hbase.hregion.memstore.flush.size (which defaults to 128MB).
       The value field assumes that the value of hbase.hregion.memstore.flush.size is unchanged from
       the default.</description>
   </property>
@@ -972,6 +1000,22 @@ possible configurations would overwhelm and obscure the important.
                  the keys are hidden.</description>
   </property>
   <property>
+    <name>hbase.coprocessor.enabled</name>
+    <value>true</value>
+    <description>Enables or disables coprocessor loading. If 'false'
+    (disabled), any other coprocessor related configuration will be ignored.
+    </description>
+  </property>
+  <property>
+    <name>hbase.coprocessor.user.enabled</name>
+    <value>true</value>
+    <description>Enables or disables user (aka. table) coprocessor loading.
+    If 'false' (disabled), any table coprocessor attributes in table
+    descriptors will be ignored. If "hbase.coprocessor.enabled" is 'false'
+    this setting has no effect.
+    </description>
+  </property>
+  <property>
     <name>hbase.coprocessor.region.classes</name>
     <value></value>
     <description>A comma-separated list of Coprocessors that are loaded by
@@ -1115,7 +1159,7 @@ possible configurations would overwhelm and obscure the important.
   <property>
    <name>hbase.regionserver.thrift.framed.max_frame_size_in_mb</name>
     <value>2</value>
-    <description>Default frame size when using framed transport</description>
+    <description>Default frame size when using framed transport, in MB</description>
   </property>
   <property>
     <name>hbase.regionserver.thrift.compact</name>
@@ -1242,6 +1286,16 @@ possible configurations would overwhelm and obscure the important.
     <description>
       Name of an algorithm that is used to compute checksums. Possible values
       are NULL, CRC32, CRC32C.
+    </description>
+  </property>
+
+  <property>
+    <name>hbase.client.scanner.max.result.size</name>
+    <value>2097152</value>
+    <description>Maximum number of bytes returned when calling a scanner's next method.
+    Note that when a single row is larger than this limit the row is still returned completely.
+    The default value is 2MB, which is good for 1ge networks.
+    With faster and/or high latency networks this value should be increased.
     </description>
   </property>
 
@@ -1438,5 +1492,13 @@ possible configurations would overwhelm and obscure the important.
     </description>
     <name>hbase.http.staticuser.user</name>
     <value>dr.stack</value>
+  </property>
+  <property>
+    <name>hbase.regionserver.handler.abort.on.error.percent</name>
+    <value>0.5</value>
+    <description>The percent of region server RPC threads failed to abort RS.
+    -1 Disable aborting; 0 Abort if even a single handler has died;
+    0.x Abort only when this percent of handlers have died;
+    1 Abort only all of the handers have died.</description>
   </property>
 </configuration>

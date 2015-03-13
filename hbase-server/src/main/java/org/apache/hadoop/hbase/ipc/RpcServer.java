@@ -44,6 +44,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.channels.WritableByteChannel;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -81,6 +82,7 @@ import org.apache.hadoop.hbase.client.Operation;
 import org.apache.hadoop.hbase.codec.Codec;
 import org.apache.hadoop.hbase.exceptions.RegionMovedException;
 import org.apache.hadoop.hbase.io.ByteBufferOutputStream;
+import org.apache.hadoop.hbase.io.BoundedByteBufferPool;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.CellBlockMeta;
@@ -119,7 +121,7 @@ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.StringUtils;
 import org.codehaus.jackson.map.ObjectMapper;
-import org.htrace.TraceInfo;
+import org.apache.htrace.TraceInfo;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.protobuf.BlockingService;
@@ -148,7 +150,7 @@ import com.google.protobuf.TextFormat;
  * CallRunner#run executes the call.  When done, asks the included Call to put itself on new
  * queue for Responder to pull from and return result to client.
  *
- * @see RpcClient
+ * @see RpcClientImpl
  */
 @InterfaceAudience.LimitedPrivate({HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX})
 @InterfaceStability.Evolving
@@ -195,8 +197,9 @@ public class RpcServer implements RpcServerInterface {
   static final ThreadLocal<MonitoredRPCHandler> MONITORED_RPC
       = new ThreadLocal<MonitoredRPCHandler>();
 
-  protected final InetSocketAddress isa;
+  protected final InetSocketAddress bindAddress;
   protected int port;                             // port we listen on
+  protected InetSocketAddress address;            // inet address we listen on
   private int readThreads;                        // number of read threads
   protected int maxIdleTime;                      // the maximum idle time after
                                                   // which a client may be
@@ -265,6 +268,9 @@ public class RpcServer implements RpcServerInterface {
 
   private UserProvider userProvider;
 
+  private final BoundedByteBufferPool reservoir;
+
+
   /**
    * Datastructure that holds all necessary to a method invocation and then afterward, carries
    * the result.
@@ -291,6 +297,7 @@ public class RpcServer implements RpcServerInterface {
     protected long size;                          // size of current call
     protected boolean isError;
     protected TraceInfo tinfo;
+    private ByteBuffer cellBlock = null;
 
     Call(int id, final BlockingService service, final MethodDescriptor md, RequestHeader header,
          Message param, CellScanner cellScanner, Connection connection, Responder responder,
@@ -309,6 +316,19 @@ public class RpcServer implements RpcServerInterface {
       this.isError = false;
       this.size = size;
       this.tinfo = tinfo;
+    }
+
+    /**
+     * Call is done. Execution happened and we returned results to client. It is now safe to
+     * cleanup.
+     */
+    void done() {
+      if (this.cellBlock != null) {
+        // Return buffer to reservoir now we are done with it.
+        reservoir.putBuffer(this.cellBlock);
+        this.cellBlock = null;
+      }
+      this.connection.decRpcCount();  // Say that we're done with this call.
     }
 
     @Override
@@ -373,12 +393,15 @@ public class RpcServer implements RpcServerInterface {
           // Set the exception as the result of the method invocation.
           headerBuilder.setException(exceptionBuilder.build());
         }
-        ByteBuffer cellBlock =
-          ipcUtil.buildCellBlock(this.connection.codec, this.connection.compressionCodec, cells);
-        if (cellBlock != null) {
+        // Pass reservoir to buildCellBlock. Keep reference to returne so can add it back to the 
+        // reservoir when finished. This is hacky and the hack is not contained but benefits are
+        // high when we can avoid a big buffer allocation on each rpc.
+        this.cellBlock = ipcUtil.buildCellBlock(this.connection.codec,
+          this.connection.compressionCodec, cells, reservoir);
+        if (this.cellBlock != null) {
           CellBlockMeta.Builder cellBlockBuilder = CellBlockMeta.newBuilder();
           // Presumes the cellBlock bytebuffer has been flipped so limit has total size in it.
-          cellBlockBuilder.setLength(cellBlock.limit());
+          cellBlockBuilder.setLength(this.cellBlock.limit());
           headerBuilder.setCellBlockMeta(cellBlockBuilder.build());
         }
         Message header = headerBuilder.build();
@@ -388,9 +411,9 @@ public class RpcServer implements RpcServerInterface {
         ByteBuffer bbHeader = IPCUtil.getDelimitedMessageAsByteBuffer(header);
         ByteBuffer bbResult = IPCUtil.getDelimitedMessageAsByteBuffer(result);
         int totalSize = bbHeader.capacity() + (bbResult == null? 0: bbResult.limit()) +
-          (cellBlock == null? 0: cellBlock.limit());
+          (this.cellBlock == null? 0: this.cellBlock.limit());
         ByteBuffer bbTotalSize = ByteBuffer.wrap(Bytes.toBytes(totalSize));
-        bc = new BufferChain(bbTotalSize, bbHeader, bbResult, cellBlock);
+        bc = new BufferChain(bbTotalSize, bbHeader, bbResult, this.cellBlock);
         if (connection.useWrap) {
           bc = wrapWithSasl(bc);
         }
@@ -524,16 +547,18 @@ public class RpcServer implements RpcServerInterface {
       acceptChannel = ServerSocketChannel.open();
       acceptChannel.configureBlocking(false);
 
-      // Bind the server socket to the local host and port
-      bind(acceptChannel.socket(), isa, backlogLength);
+      // Bind the server socket to the binding addrees (can be different from the default interface)
+      bind(acceptChannel.socket(), bindAddress, backlogLength);
       port = acceptChannel.socket().getLocalPort(); //Could be an ephemeral port
+      address = (InetSocketAddress)acceptChannel.socket().getLocalSocketAddress();
       // create a selector;
       selector= Selector.open();
 
       readers = new Reader[readThreads];
       readPool = Executors.newFixedThreadPool(readThreads,
         new ThreadFactoryBuilder().setNameFormat(
-          "RpcServer.reader=%d,port=" + port).setDaemon(true).build());
+          "RpcServer.reader=%d,bindAddress=" + bindAddress.getHostName() +
+          ",port=" + port).setDaemon(true).build());
       for (int i = 0; i < readThreads; ++i) {
         Reader reader = new Reader();
         readers[i] = reader;
@@ -752,7 +777,7 @@ public class RpcServer implements RpcServerInterface {
     }
 
     InetSocketAddress getAddress() {
-      return (InetSocketAddress)acceptChannel.socket().getLocalSocketAddress();
+      return address;
     }
 
     void doAccept(SelectionKey key) throws IOException, OutOfMemoryError {
@@ -1047,7 +1072,7 @@ public class RpcServer implements RpcServerInterface {
       }
 
       if (!call.response.hasRemaining()) {
-        call.connection.decRpcCount();  // Say that we're done with this call.
+        call.done();
         return true;
       } else {
         return false; // Socket can't take more, we will have to come back.
@@ -1412,9 +1437,9 @@ public class RpcServer implements RpcServerInterface {
       int count;
       // Check for 'HBas' magic.
       this.dataLengthBuffer.flip();
-      if (!HConstants.RPC_HEADER.equals(dataLengthBuffer)) {
+      if (!Arrays.equals(HConstants.RPC_HEADER, dataLengthBuffer.array())) {
         return doBadPreambleHandling("Expected HEADER=" +
-            Bytes.toStringBinary(HConstants.RPC_HEADER.array()) +
+            Bytes.toStringBinary(HConstants.RPC_HEADER) +
             " but received HEADER=" + Bytes.toStringBinary(dataLengthBuffer.array()) +
             " from " + toString());
       }
@@ -1719,7 +1744,8 @@ public class RpcServer implements RpcServerInterface {
             responder, totalRequestSize, null);
         ByteArrayOutputStream responseBuffer = new ByteArrayOutputStream();
         setupResponse(responseBuffer, callTooBig, new CallQueueTooBigException(),
-          "Call queue is full, is hbase.ipc.server.max.callqueue.size too small?");
+          "Call queue is full on " + getListenerAddress() +
+          ", is hbase.ipc.server.max.callqueue.size too small?");
         responder.doRespond(callTooBig);
         return;
       }
@@ -1745,7 +1771,8 @@ public class RpcServer implements RpcServerInterface {
             buf, offset, buf.length);
         }
       } catch (Throwable t) {
-        String msg = "Unable to read call parameter from client " + getHostAddress();
+        String msg = getListenerAddress() + " is unable to read call parameter from client " +
+            getHostAddress();
         LOG.warn(msg, t);
 
         // probably the hbase hadoop version does not match the running hadoop version
@@ -1870,17 +1897,25 @@ public class RpcServer implements RpcServerInterface {
    * instance else pass null for no authentication check.
    * @param name Used keying this rpc servers' metrics and for naming the Listener thread.
    * @param services A list of services.
-   * @param isa Where to listen
-   * @throws IOException
+   * @param bindAddress Where to listen
+   * @param conf
+   * @param scheduler
    */
   public RpcServer(final Server server, final String name,
       final List<BlockingServiceAndInterface> services,
-      final InetSocketAddress isa, Configuration conf,
+      final InetSocketAddress bindAddress, Configuration conf,
       RpcScheduler scheduler)
-  throws IOException {
+      throws IOException {
+    this.reservoir = new BoundedByteBufferPool(
+      conf.getInt("hbase.ipc.server.reservoir.max.buffer.size",  1024 * 1024),
+      conf.getInt("hbase.ipc.server.reservoir.initial.buffer.size", 16 * 1024),
+      // Make the max twice the number of handlers to be safe.
+      conf.getInt("hbase.ipc.server.reservoir.initial.max",
+        conf.getInt(HConstants.REGION_SERVER_HANDLER_COUNT,
+          HConstants.DEFAULT_REGION_SERVER_HANDLER_COUNT) * 2));
     this.server = server;
     this.services = services;
-    this.isa = isa;
+    this.bindAddress = bindAddress;
     this.conf = conf;
     this.socketSendBufferSize = 0;
     this.maxQueueSize =

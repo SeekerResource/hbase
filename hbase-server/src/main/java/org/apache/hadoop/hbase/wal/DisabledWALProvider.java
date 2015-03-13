@@ -19,6 +19,7 @@ package org.apache.hadoop.hbase.wal;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -27,7 +28,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -56,9 +56,12 @@ class DisabledWALProvider implements WALProvider {
 
   @Override
   public void init(final WALFactory factory, final Configuration conf,
-      final List<WALActionsListener> listeners, final String providerId) throws IOException {
+      final List<WALActionsListener> listeners, String providerId) throws IOException {
     if (null != disabled) {
       throw new IllegalStateException("WALProvider.init should only be called once.");
+    }
+    if (null == providerId) {
+      providerId = "defaultDisabled";
     }
     disabled = new DisabledWAL(new Path(FSUtils.getRootDir(conf), providerId), conf, null);
   }
@@ -110,7 +113,7 @@ class DisabledWALProvider implements WALProvider {
     public byte[][] rollWriter() {
       if (!listeners.isEmpty()) {
         for (WALActionsListener listener : listeners) {
-          listener.logRollRequested();
+          listener.logRollRequested(false);
         }
         for (WALActionsListener listener : listeners) {
           try {
@@ -183,7 +186,7 @@ class DisabledWALProvider implements WALProvider {
     }
 
     @Override
-    public boolean startCacheFlush(final byte[] encodedRegionName) {
+    public boolean startCacheFlush(final byte[] encodedRegionName, Set<byte[]> flushedFamilyNames) {
       return !(closed.get());
     }
 
@@ -202,6 +205,11 @@ class DisabledWALProvider implements WALProvider {
 
     @Override
     public long getEarliestMemstoreSeqNum(byte[] encodedRegionName) {
+      return HConstants.NO_SEQNUM;
+    }
+
+    @Override
+    public long getEarliestMemstoreSeqNum(byte[] encodedRegionName, byte[] familyName) {
       return HConstants.NO_SEQNUM;
     }
 

@@ -27,7 +27,10 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,6 +41,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -53,7 +57,6 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
@@ -68,6 +71,7 @@ import org.apache.hadoop.hbase.regionserver.FlushRequestListener;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.regionserver.MemStoreSnapshot;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
@@ -83,17 +87,17 @@ import org.apache.hadoop.hbase.util.HFileTestUtil;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.DefaultWALProvider;
 import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Test;
 import org.junit.Rule;
-import org.junit.rules.TestName;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 import org.mockito.Mockito;
 
 /**
@@ -182,7 +186,7 @@ public class TestWALReplay {
     byte[] value = Bytes.toBytes("testV");
     byte[][] familys = { family1, family2 };
     TEST_UTIL.createTable(tableName, familys);
-    Table htable = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    Table htable = TEST_UTIL.getConnection().getTable(tableName);
     Put put = new Put(Bytes.toBytes("r1"));
     put.add(family1, qualifier, value);
     htable.put(put);
@@ -269,7 +273,7 @@ public class TestWALReplay {
   /**
    * Tests for hbase-2727.
    * @throws Exception
-   * @see https://issues.apache.org/jira/browse/HBASE-2727
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-2727">HBASE-2727</a>
    */
   @Test
   public void test2727() throws Exception {
@@ -282,9 +286,8 @@ public class TestWALReplay {
     deleteDir(basedir);
 
     HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HRegion.createHRegion(hri,
-        hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region2);
+    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region2);
     final byte [] rowName = tableName.getName();
 
     WAL wal1 = createWAL(this.conf);
@@ -344,9 +347,8 @@ public class TestWALReplay {
     final Path basedir = new Path(this.hbaseRootDir, tableName.getNameAsString());
     deleteDir(basedir);
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HRegion.createHRegion(hri,
-        hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region2);
+    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region2);
     WAL wal = createWAL(this.conf);
     HRegion region = HRegion.openHRegion(hri, htd, wal, this.conf);
 
@@ -411,9 +413,8 @@ public class TestWALReplay {
     final Path basedir = new Path(this.hbaseRootDir, tableName.getNameAsString());
     deleteDir(basedir);
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HRegion.createHRegion(hri,
-        hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region2);
+    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region2);
     WAL wal = createWAL(this.conf);
     HRegion region = HRegion.openHRegion(hri, htd, wal, this.conf);
 
@@ -484,9 +485,8 @@ public class TestWALReplay {
     final byte[] rowName = tableName.getName();
     final int countPerFamily = 10;
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region3 = HRegion.createHRegion(hri,
-            hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region3);
+    HRegion region3 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region3);
     // Write countPerFamily edits into the three families.  Do a flush on one
     // of the families during the load of edits so its seqid is not same as
     // others to test we do right thing when different seqids.
@@ -594,9 +594,8 @@ public class TestWALReplay {
     final byte[] rowName = tableName.getName();
     final int countPerFamily = 10;
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region3 = HRegion.createHRegion(hri,
-            hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region3);
+    HRegion region3 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region3);
     // Write countPerFamily edits into the three families.  Do a flush on one
     // of the families during the load of edits so its seqid is not same as
     // others to test we do right thing when different seqids.
@@ -677,9 +676,8 @@ public class TestWALReplay {
     final Path basedir = FSUtils.getTableDir(this.hbaseRootDir, tableName);
     deleteDir(basedir);
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region3 = HRegion.createHRegion(hri, hbaseRootDir, this.conf, htd);
-    region3.close();
-    region3.getWAL().close();
+    HRegion region3 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region3);
     // Write countPerFamily edits into the three families. Do a flush on one
     // of the families during the load of edits so its seqid is not same as
     // others to test we do right thing when different seqids.
@@ -752,7 +750,7 @@ public class TestWALReplay {
     int scannedCount = 0;
     List<Cell> results = new ArrayList<Cell>();
     while (true) {
-      boolean existMore = scanner.next(results);
+      boolean existMore = NextState.hasMoreValues(scanner.next(results));
       if (!results.isEmpty())
         scannedCount++;
       if (!existMore)
@@ -776,9 +774,8 @@ public class TestWALReplay {
     deleteDir(basedir);
 
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HRegion.createHRegion(hri,
-            hbaseRootDir, this.conf, htd);
-    HRegion.closeHRegion(region2);
+    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    HBaseTestingUtility.closeRegionAndWAL(region2);
     final WAL wal = createWAL(this.conf);
     final byte[] rowName = tableName.getName();
     final byte[] regionName = hri.getEncodedNameAsBytes();
@@ -786,13 +783,15 @@ public class TestWALReplay {
 
     // Add 1k to each family.
     final int countPerFamily = 1000;
+    Set<byte[]> familyNames = new HashSet<byte[]>();
     for (HColumnDescriptor hcd: htd.getFamilies()) {
       addWALEdits(tableName, hri, rowName, hcd.getName(), countPerFamily,
           ee, wal, htd, sequenceId);
+      familyNames.add(hcd.getName());
     }
 
     // Add a cache flush, shouldn't have any effect
-    wal.startCacheFlush(regionName);
+    wal.startCacheFlush(regionName, familyNames);
     wal.completeCacheFlush(regionName);
 
     // Add an edit to another family, should be skipped.
@@ -832,12 +831,13 @@ public class TestWALReplay {
           final HRegion region =
               new HRegion(basedir, newWal, newFS, newConf, hri, htd, null) {
             @Override
-            protected FlushResult internalFlushcache(
-                final WAL wal, final long myseqid, MonitoredTask status)
-            throws IOException {
+            protected FlushResult internalFlushcache(final WAL wal, final long myseqid,
+                final Collection<Store> storesToFlush, MonitoredTask status,
+                boolean writeFlushWalMarker)
+                    throws IOException {
               LOG.info("InternalFlushCache Invoked");
-              FlushResult fs = super.internalFlushcache(wal, myseqid,
-                  Mockito.mock(MonitoredTask.class));
+              FlushResult fs = super.internalFlushcache(wal, myseqid, storesToFlush,
+                  Mockito.mock(MonitoredTask.class), writeFlushWalMarker);
               flushcount.incrementAndGet();
               return fs;
             };
@@ -900,8 +900,16 @@ public class TestWALReplay {
     WALSplitter.splitLogFile(hbaseRootDir, listStatus[0],
         this.fs, this.conf, null, null, null, mode, wals);
     FileStatus[] listStatus1 = this.fs.listStatus(
-        new Path(FSUtils.getTableDir(hbaseRootDir, tableName),
-            new Path(hri.getEncodedName(), "recovered.edits")));
+      new Path(FSUtils.getTableDir(hbaseRootDir, tableName), new Path(hri.getEncodedName(),
+          "recovered.edits")), new PathFilter() {
+        @Override
+        public boolean accept(Path p) {
+          if (WALSplitter.isSequenceIdFile(p)) {
+            return false;
+          }
+          return true;
+        }
+      });
     int editCount = 0;
     for (FileStatus fileStatus : listStatus1) {
       editCount = Integer.parseInt(fileStatus.getPath().getName());
@@ -950,16 +958,16 @@ public class TestWALReplay {
     private HRegion r;
 
     @Override
-    public void requestFlush(HRegion region) {
+    public void requestFlush(HRegion region, boolean forceFlushAllStores) {
       try {
-        r.flushcache();
+        r.flushcache(forceFlushAllStores);
       } catch (IOException e) {
         throw new RuntimeException("Exception flushing", e);
       }
     }
 
     @Override
-    public void requestDelayedFlush(HRegion region, long when) {
+    public void requestDelayedFlush(HRegion region, long when, boolean forceFlushAllStores) {
       // TODO Auto-generated method stub
 
     }

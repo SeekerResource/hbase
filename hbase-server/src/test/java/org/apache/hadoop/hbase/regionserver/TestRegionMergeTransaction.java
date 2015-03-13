@@ -44,11 +44,12 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.Before;
@@ -248,7 +249,7 @@ public class TestRegionMergeTransaction {
       assertEquals((rowCountOfRegionA + rowCountOfRegionB),
           mergedRegionRowCount);
     } finally {
-      HRegion.closeHRegion(mergedRegion);
+      HBaseTestingUtility.closeRegionAndWAL(mergedRegion);
     }
     // Assert the write lock is no longer held on region_a and region_b
     assertTrue(!this.region_a.lock.writeLock().isHeldByCurrentThread());
@@ -308,7 +309,7 @@ public class TestRegionMergeTransaction {
       assertEquals((rowCountOfRegionA + rowCountOfRegionB),
           mergedRegionRowCount);
     } finally {
-      HRegion.closeHRegion(mergedRegion);
+      HBaseTestingUtility.closeRegionAndWAL(mergedRegion);
     }
     // Assert the write lock is no longer held on region_a and region_b
     assertTrue(!this.region_a.lock.writeLock().isHeldByCurrentThread());
@@ -412,9 +413,9 @@ public class TestRegionMergeTransaction {
     HColumnDescriptor hcd = new HColumnDescriptor(CF);
     htd.addFamily(hcd);
     HRegionInfo hri = new HRegionInfo(htd.getTableName(), startrow, endrow);
-    HRegion a = HRegion.createHRegion(hri, testdir,
+    HRegion a = HBaseTestingUtility.createRegionAndWAL(hri, testdir,
         TEST_UTIL.getConfiguration(), htd);
-    HRegion.closeHRegion(a);
+    HBaseTestingUtility.closeRegionAndWAL(a);
     return HRegion.openHRegion(testdir, hri, htd, wals.getWAL(hri.getEncodedNameAsBytes()),
         TEST_UTIL.getConfiguration());
   }
@@ -426,7 +427,7 @@ public class TestRegionMergeTransaction {
       List<Cell> kvs = new ArrayList<Cell>();
       boolean hasNext = true;
       while (hasNext) {
-        hasNext = scanner.next(kvs);
+        hasNext = NextState.hasMoreValues(scanner.next(kvs));
         if (!kvs.isEmpty())
           rowcount++;
       }

@@ -21,11 +21,7 @@ package org.apache.hadoop.hbase.master;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
-import java.util.regex.Pattern;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -39,7 +35,6 @@ import org.apache.hadoop.hbase.PleaseHoldException;
 import org.apache.hadoop.hbase.ServerLoad;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.TableState;
@@ -51,14 +46,12 @@ import org.apache.hadoop.hbase.procedure.MasterProcedureManager;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.RequestConverter;
 import org.apache.hadoop.hbase.protobuf.ResponseConverter;
-import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.protobuf.generated.*;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.NameStringPair;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.ProcedureDescription;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.RegionSpecifierType;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.protobuf.generated.MasterProtos;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.AddColumnRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.AddColumnResponse;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.AssignRegionRequest;
@@ -115,6 +108,9 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableDescript
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableDescriptorsByNamespaceResponse;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableNamesByNamespaceRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableNamesByNamespaceResponse;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MajorCompactionTimestampForRegionRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MajorCompactionTimestampRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MajorCompactionTimestampResponse;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MasterService;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyColumnRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyColumnResponse;
@@ -273,9 +269,9 @@ public class MasterRpcServices extends RSRpcServices
     } catch (IOException ioe) {
       throw new ServiceException(ioe);
     }
-    byte[] regionName = request.getRegionName().toByteArray();
-    long seqId = master.serverManager.getLastFlushedSequenceId(regionName);
-    return ResponseConverter.buildGetLastFlushedSequenceIdResponse(seqId);
+    byte[] encodedRegionName = request.getRegionName().toByteArray();
+    RegionStoreSequenceIds ids = master.serverManager.getLastFlushedSequenceId(encodedRegionName);
+    return ResponseConverter.buildGetLastFlushedSequenceIdResponse(ids);
   }
 
   @Override
@@ -529,6 +525,10 @@ public class MasterRpcServices extends RSRpcServices
 
     HRegionInfo regionInfoA = regionStateA.getRegion();
     HRegionInfo regionInfoB = regionStateB.getRegion();
+    if (regionInfoA.getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID ||
+        regionInfoB.getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID) {
+      throw new ServiceException(new MergeRegionException("Can't merge non-default replicas"));
+    }
     if (regionInfoA.compareTo(regionInfoB) == 0) {
       throw new ServiceException(new MergeRegionException(
         "Unable to merge a region to itself " + regionInfoA + ", " + regionInfoB));
@@ -784,90 +784,31 @@ public class MasterRpcServices extends RSRpcServices
       GetTableDescriptorsRequest req) throws ServiceException {
     try {
       master.checkInitialized();
-    } catch (IOException e) {
-      throw new ServiceException(e);
-    }
 
-    List<HTableDescriptor> descriptors = new ArrayList<HTableDescriptor>();
-    List<TableName> tableNameList = new ArrayList<TableName>();
-    for(HBaseProtos.TableName tableNamePB: req.getTableNamesList()) {
-      tableNameList.add(ProtobufUtil.toTableName(tableNamePB));
-    }
-    boolean bypass = false;
-    String regex = req.hasRegex() ? req.getRegex() : null;
-    if (master.cpHost != null) {
-      try {
-        bypass = master.cpHost.preGetTableDescriptors(tableNameList, descriptors);
-        // method required for AccessController.
-        bypass |= master.cpHost.preGetTableDescriptors(tableNameList, descriptors, regex);
-      } catch (IOException ioe) {
-        throw new ServiceException(ioe);
-      }
-    }
-
-    if (!bypass) {
-      if (req.getTableNamesCount() == 0) {
-        // request for all TableDescriptors
-        Map<String, HTableDescriptor> descriptorMap = null;
-        try {
-          descriptorMap = master.getTableDescriptors().getAll();
-        } catch (IOException e) {
-          LOG.warn("Failed getting all descriptors", e);
-        }
-        if (descriptorMap != null) {
-          for(HTableDescriptor desc: descriptorMap.values()) {
-            if(!desc.getTableName().isSystemTable()) {
-              descriptors.add(desc);
-            }
-          }
-        }
-      } else {
-        for (TableName s: tableNameList) {
-          try {
-            HTableDescriptor desc = master.getTableDescriptors().get(s);
-            if (desc != null) {
-              descriptors.add(desc);
-            }
-          } catch (IOException e) {
-            LOG.warn("Failed getting descriptor for " + s, e);
-          }
+      final String regex = req.hasRegex() ? req.getRegex() : null;
+      final String namespace = req.hasNamespace() ? req.getNamespace() : null;
+      List<TableName> tableNameList = null;
+      if (req.getTableNamesCount() > 0) {
+        tableNameList = new ArrayList<TableName>(req.getTableNamesCount());
+        for (HBaseProtos.TableName tableNamePB: req.getTableNamesList()) {
+          tableNameList.add(ProtobufUtil.toTableName(tableNamePB));
         }
       }
 
-      // Retains only those matched by regular expression.
-      if(regex != null) {
-        Pattern pat = Pattern.compile(regex);
-        for (Iterator<HTableDescriptor> itr = descriptors.iterator(); itr.hasNext(); ) {
-          HTableDescriptor htd = itr.next();
-          String tableName = htd.getTableName().getNameAsString();
-          String defaultNameSpace = NamespaceDescriptor.DEFAULT_NAMESPACE_NAME_STR;
-          boolean matched = pat.matcher(tableName).matches();
-          if(!matched && htd.getTableName().getNamespaceAsString().equals(defaultNameSpace)) {
-            matched = pat.matcher(defaultNameSpace + TableName.NAMESPACE_DELIM + tableName)
-                .matches();
-          }
-          if (!matched)
-            itr.remove();
-          }
-      }
+      List<HTableDescriptor> descriptors = master.listTableDescriptors(namespace, regex,
+          tableNameList, req.getIncludeSysTables());
 
-      if (master.cpHost != null) {
-        try {
-          master.cpHost.postGetTableDescriptors(descriptors);
-          // method required for AccessController.
-          master.cpHost.postGetTableDescriptors(descriptors, regex);
-        } catch (IOException ioe) {
-          throw new ServiceException(ioe);
+      GetTableDescriptorsResponse.Builder builder = GetTableDescriptorsResponse.newBuilder();
+      if (descriptors != null && descriptors.size() > 0) {
+        // Add the table descriptors to the response
+        for (HTableDescriptor htd: descriptors) {
+          builder.addTableSchema(htd.convert());
         }
       }
+      return builder.build();
+    } catch (IOException ioe) {
+      throw new ServiceException(ioe);
     }
-
-
-    GetTableDescriptorsResponse.Builder builder = GetTableDescriptorsResponse.newBuilder();
-    for (HTableDescriptor htd: descriptors) {
-      builder.addTableSchema(htd.convert());
-    }
-    return builder.build();
   }
 
   /**
@@ -882,13 +823,18 @@ public class MasterRpcServices extends RSRpcServices
       GetTableNamesRequest req) throws ServiceException {
     try {
       master.checkServiceStarted();
-      Collection<HTableDescriptor> descriptors = master.getTableDescriptors().getAll().values();
+
+      final String regex = req.hasRegex() ? req.getRegex() : null;
+      final String namespace = req.hasNamespace() ? req.getNamespace() : null;
+      List<TableName> tableNames = master.listTableNames(namespace, regex,
+          req.getIncludeSysTables());
+
       GetTableNamesResponse.Builder builder = GetTableNamesResponse.newBuilder();
-      for (HTableDescriptor descriptor: descriptors) {
-        if (descriptor.getTableName().isSystemTable()) {
-          continue;
+      if (tableNames != null && tableNames.size() > 0) {
+        // Add the table names to the response
+        for (TableName table: tableNames) {
+          builder.addTableNames(ProtobufUtil.toProtoTableName(table));
         }
-        builder.addTableNames(ProtobufUtil.toProtoTableName(descriptor.getTableName()));
       }
       return builder.build();
     } catch (IOException e) {
@@ -904,8 +850,6 @@ public class MasterRpcServices extends RSRpcServices
       TableName tableName = ProtobufUtil.toTableName(request.getTableName());
       TableState.State state = master.getTableStateManager()
               .getTableState(tableName);
-      if (state == null)
-        throw new TableNotFoundException(tableName);
       MasterProtos.GetTableStateResponse.Builder builder =
               MasterProtos.GetTableStateResponse.newBuilder();
       builder.setTableState(new TableState(tableName, state).convert());
@@ -1034,8 +978,9 @@ public class MasterRpcServices extends RSRpcServices
       ListTableDescriptorsByNamespaceRequest request) throws ServiceException {
     try {
       ListTableDescriptorsByNamespaceResponse.Builder b =
-        ListTableDescriptorsByNamespaceResponse.newBuilder();
-      for(HTableDescriptor htd: master.listTableDescriptorsByNamespace(request.getNamespaceName())) {
+          ListTableDescriptorsByNamespaceResponse.newBuilder();
+      for (HTableDescriptor htd : master
+          .listTableDescriptorsByNamespace(request.getNamespaceName())) {
         b.addTableSchema(htd.convert());
       }
       return b.build();
@@ -1328,5 +1273,36 @@ public class MasterRpcServices extends RSRpcServices
     } catch (Exception e) {
       throw new ServiceException(e);
     }
+  }
+
+  @Override
+  public MajorCompactionTimestampResponse getLastMajorCompactionTimestamp(RpcController controller,
+      MajorCompactionTimestampRequest request) throws ServiceException {
+    MajorCompactionTimestampResponse.Builder response =
+        MajorCompactionTimestampResponse.newBuilder();
+    try {
+      master.checkInitialized();
+      response.setCompactionTimestamp(master.getLastMajorCompactionTimestamp(ProtobufUtil
+          .toTableName(request.getTableName())));
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    return response.build();
+  }
+
+  @Override
+  public MajorCompactionTimestampResponse getLastMajorCompactionTimestampForRegion(
+      RpcController controller, MajorCompactionTimestampForRegionRequest request)
+      throws ServiceException {
+    MajorCompactionTimestampResponse.Builder response =
+        MajorCompactionTimestampResponse.newBuilder();
+    try {
+      master.checkInitialized();
+      response.setCompactionTimestamp(master.getLastMajorCompactionTimestampForRegion(request
+          .getRegion().getValue().toByteArray()));
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    return response.build();
   }
 }

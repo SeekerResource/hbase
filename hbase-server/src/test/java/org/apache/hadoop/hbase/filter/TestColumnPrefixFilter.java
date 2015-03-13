@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.hbase.filter;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,12 +27,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.KeyValueTestUtil;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -51,8 +59,8 @@ public class TestColumnPrefixFilter {
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestColumnPrefixFilter"));
     htd.addFamily((new HColumnDescriptor(family)).setMaxVersions(3));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    HRegion region = HRegion.createHRegion(info, TEST_UTIL.
-      getDataTestDir(), TEST_UTIL.getConfiguration(), htd);
+    HRegion region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+        TEST_UTIL.getConfiguration(), htd);
     try {
       List<String> rows = generateRandomWords(100, "row");
       List<String> columns = generateRandomWords(10000, "column");
@@ -97,14 +105,14 @@ public class TestColumnPrefixFilter {
 
         InternalScanner scanner = region.getScanner(scan);
         List<Cell> results = new ArrayList<Cell>();
-        while(scanner.next(results));
+        while (NextState.hasMoreValues(scanner.next(results)));
         assertEquals(prefixMap.get(s).size(), results.size());
       }
     } finally {
-      HRegion.closeHRegion(region);
+      HBaseTestingUtility.closeRegionAndWAL(region);
     }
 
-    HRegion.closeHRegion(region);
+    HBaseTestingUtility.closeRegionAndWAL(region);
   }
 
   @Test
@@ -113,8 +121,8 @@ public class TestColumnPrefixFilter {
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestColumnPrefixFilter"));
     htd.addFamily((new HColumnDescriptor(family)).setMaxVersions(3));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    HRegion region = HRegion.createHRegion(info, TEST_UTIL.
-      getDataTestDir(), TEST_UTIL.getConfiguration(), htd);
+    HRegion region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+        TEST_UTIL.getConfiguration(), htd);
     try {
       List<String> rows = generateRandomWords(100, "row");
       List<String> columns = generateRandomWords(10000, "column");
@@ -162,14 +170,14 @@ public class TestColumnPrefixFilter {
 
         InternalScanner scanner = region.getScanner(scan);
         List<Cell> results = new ArrayList<Cell>();
-        while(scanner.next(results));
+        while (NextState.hasMoreValues(scanner.next(results)));
         assertEquals(prefixMap.get(s).size(), results.size());
       }
     } finally {
-      HRegion.closeHRegion(region);
+      HBaseTestingUtility.closeRegionAndWAL(region);
     }
 
-    HRegion.closeHRegion(region);
+    HBaseTestingUtility.closeRegionAndWAL(region);
   }
 
   List<String> generateRandomWords(int numberOfWords, String suffix) {

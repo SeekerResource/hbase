@@ -611,6 +611,7 @@ public class SplitTransaction {
       // no file needs to be splitted.
       return new Pair<Integer, Integer>(0,0);
     }
+    LOG.info("Preparing to split " + nbFiles + " storefiles for region " + this.parent);
     ThreadFactoryBuilder builder = new ThreadFactoryBuilder();
     builder.setNameFormat("StoreFileSplitter-%1$d");
     ThreadFactory factory = builder.build();
@@ -660,15 +661,22 @@ public class SplitTransaction {
       }
     }
 
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Split storefiles for region " + this.parent + " Daugther A: " + created_a
+          + " storefiles, Daugther B: " + created_b + " storefiles.");
+    }
     return new Pair<Integer, Integer>(created_a, created_b);
   }
 
   private Pair<Path, Path> splitStoreFile(final byte[] family, final StoreFile sf) throws IOException {
     HRegionFileSystem fs = this.parent.getRegionFileSystem();
     String familyName = Bytes.toString(family);
-
-    Path path_a = fs.splitStoreFile(this.hri_a, familyName, sf, this.splitrow, false);
-    Path path_b = fs.splitStoreFile(this.hri_b, familyName, sf, this.splitrow, true);
+    Path path_a =
+        fs.splitStoreFile(this.hri_a, familyName, sf, this.splitrow, false,
+          this.parent.getSplitPolicy());
+    Path path_b =
+        fs.splitStoreFile(this.hri_b, familyName, sf, this.splitrow, true,
+          this.parent.getSplitPolicy());
     return new Pair<Path,Path>(path_a, path_b);
   }
 

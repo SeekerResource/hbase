@@ -32,7 +32,7 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 public class UnmodifyableHTableDescriptor extends HTableDescriptor {
   /** Default constructor */
   public UnmodifyableHTableDescriptor() {
-	  super();
+    super();
   }
 
   /*
@@ -121,12 +121,4 @@ public class UnmodifyableHTableDescriptor extends HTableDescriptor {
   public HTableDescriptor setMemStoreFlushSize(long memstoreFlushSize) {
     throw new UnsupportedOperationException("HTableDescriptor is read-only");
   }
-
-//  /**
-//   * @see org.apache.hadoop.hbase.HTableDescriptor#addIndex(org.apache.hadoop.hbase.client.tableindexed.IndexSpecification)
-//   */
-//  @Override
-//  public void addIndex(IndexSpecification index) {
-//    throw new UnsupportedOperationException("HTableDescriptor is read-only");
-//  }
 }

@@ -23,11 +23,13 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -48,11 +50,12 @@ import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.backoff.ServerStatistics;
 import org.apache.hadoop.hbase.client.coprocessor.Batch;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.htrace.Trace;
+import org.apache.htrace.Trace;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -125,7 +128,7 @@ class AsyncProcess {
 
   /** Return value from a submit that didn't contain any requests. */
   private static final AsyncRequestFuture NO_REQS_RESULT = new AsyncRequestFuture() {
-    public final Object[] result = new Object[0];
+    final Object[] result = new Object[0];
     @Override
     public boolean hasError() { return false; }
     @Override
@@ -241,7 +244,8 @@ class AsyncProcess {
   }
 
   public AsyncProcess(ClusterConnection hc, Configuration conf, ExecutorService pool,
-      RpcRetryingCallerFactory rpcCaller, boolean useGlobalErrors, RpcControllerFactory rpcFactory) {
+      RpcRetryingCallerFactory rpcCaller, boolean useGlobalErrors,
+      RpcControllerFactory rpcFactory) {
     if (hc == null) {
       throw new IllegalArgumentException("HConnection cannot be null.");
     }
@@ -309,11 +313,12 @@ class AsyncProcess {
   }
 
   /**
-   * See {@link #submit(ExecutorService, TableName, List, boolean, org.apache.hadoop.hbase.client.coprocessor.Batch.Callback, boolean)}.
+   * See {@link #submit(ExecutorService, TableName, List, boolean, Batch.Callback, boolean)}.
    * Uses default ExecutorService for this AP (must have been created with one).
    */
   public <CResult> AsyncRequestFuture submit(TableName tableName, List<? extends Row> rows,
-      boolean atLeastOne, Batch.Callback<CResult> callback, boolean needResults) throws InterruptedIOException {
+      boolean atLeastOne, Batch.Callback<CResult> callback, boolean needResults)
+      throws InterruptedIOException {
     return submit(null, tableName, rows, atLeastOne, callback, needResults);
   }
 
@@ -374,7 +379,7 @@ class AsyncProcess {
           locationErrors = new ArrayList<Exception>();
           locationErrorRows = new ArrayList<Integer>();
           LOG.error("Failed to get region location ", ex);
-          // This action failed before creating ars. Add it to retained but do not add to submit list.
+          // This action failed before creating ars. Retain it, but do not add to submit list.
           // We will then add it to ars in an already-failed state.
           retainedActions.add(new Action<Row>(r, ++posInList));
           locationErrors.add(ex);
@@ -511,7 +516,7 @@ class AsyncProcess {
   }
 
   /**
-   * See {@link #submitAll(ExecutorService, TableName, List, org.apache.hadoop.hbase.client.coprocessor.Batch.Callback, Object[])}.
+   * See {@link #submitAll(ExecutorService, TableName, List, Batch.Callback, Object[])}.
    * Uses default ExecutorService for this AP (must have been created with one).
    */
   public <CResult> AsyncRequestFuture submitAll(TableName tableName,
@@ -681,21 +686,33 @@ class AsyncProcess {
       private final MultiAction<Row> multiAction;
       private final int numAttempt;
       private final ServerName server;
+      private final Set<MultiServerCallable<Row>> callsInProgress;
 
       private SingleServerRequestRunnable(
-          MultiAction<Row> multiAction, int numAttempt, ServerName server) {
+          MultiAction<Row> multiAction, int numAttempt, ServerName server,
+          Set<MultiServerCallable<Row>> callsInProgress) {
         this.multiAction = multiAction;
         this.numAttempt = numAttempt;
         this.server = server;
+        this.callsInProgress = callsInProgress;
       }
 
       @Override
       public void run() {
         MultiResponse res;
+        MultiServerCallable<Row> callable = null;
         try {
-          MultiServerCallable<Row> callable = createCallable(server, tableName, multiAction);
+          callable = createCallable(server, tableName, multiAction);
           try {
-            res = createCaller(callable).callWithoutRetries(callable, timeout);
+            RpcRetryingCaller<MultiResponse> caller = createCaller(callable);
+            if (callsInProgress != null) callsInProgress.add(callable);
+            res = caller.callWithoutRetries(callable, timeout);
+
+            if (res == null) {
+              // Cancelled
+              return;
+            }
+
           } catch (IOException e) {
             // The service itself failed . It may be an error coming from the communication
             //   layer, but, as well, a functional error raised by the server.
@@ -718,6 +735,9 @@ class AsyncProcess {
               throw new RuntimeException(t);
         } finally {
           decTaskCounters(multiAction.getRegions(), server);
+          if (callsInProgress != null && callable != null) {
+            callsInProgress.remove(callable);
+          }
         }
       }
     }
@@ -726,6 +746,7 @@ class AsyncProcess {
     private final BatchErrors errors;
     private final ConnectionManager.ServerErrorTracker errorsByServer;
     private final ExecutorService pool;
+    private final Set<MultiServerCallable<Row>> callsInProgress;
 
 
     private final TableName tableName;
@@ -810,8 +831,15 @@ class AsyncProcess {
       } else {
         this.replicaGetIndices = null;
       }
+      this.callsInProgress = !hasAnyReplicaGets ? null :
+          Collections.newSetFromMap(new ConcurrentHashMap<MultiServerCallable<Row>, Boolean>());
+
       this.errorsByServer = createServerErrorTracker();
       this.errors = (globalErrors != null) ? globalErrors : new BatchErrors();
+    }
+
+    public Set<MultiServerCallable<Row>> getCallsInProgress() {
+      return callsInProgress;
     }
 
     /**
@@ -918,14 +946,12 @@ class AsyncProcess {
       return loc;
     }
 
-
-
     /**
      * Send a multi action structure to the servers, after a delay depending on the attempt
      * number. Asynchronous.
      *
      * @param actionsByServer the actions structured by regions
-     * @param numAttempt      the attempt number.
+     * @param numAttempt the attempt number.
      * @param actionsForReplicaThread original actions for replica thread; null on non-first call.
      */
     private void sendMultiAction(Map<ServerName, MultiAction<Row>> actionsByServer,
@@ -935,31 +961,97 @@ class AsyncProcess {
       int actionsRemaining = actionsByServer.size();
       // This iteration is by server (the HRegionLocation comparator is by server portion only).
       for (Map.Entry<ServerName, MultiAction<Row>> e : actionsByServer.entrySet()) {
-        final ServerName server = e.getKey();
-        final MultiAction<Row> multiAction = e.getValue();
+        ServerName server = e.getKey();
+        MultiAction<Row> multiAction = e.getValue();
         incTaskCounters(multiAction.getRegions(), server);
-        Runnable runnable = Trace.wrap("AsyncProcess.sendMultiAction",
-            new SingleServerRequestRunnable(multiAction, numAttempt, server));
-        if ((--actionsRemaining == 0) && reuseThread) {
-          runnable.run();
-        } else {
-          try {
-            pool.submit(runnable);
-          } catch (RejectedExecutionException ree) {
-            // This should never happen. But as the pool is provided by the end user, let's secure
-            //  this a little.
-            decTaskCounters(multiAction.getRegions(), server);
-            LOG.warn("#" + id + ", the task was rejected by the pool. This is unexpected." +
-                " Server is " + server.getServerName(), ree);
-            // We're likely to fail again, but this will increment the attempt counter, so it will
-            //  finish.
-            receiveGlobalFailure(multiAction, server, numAttempt, ree);
+        Collection<? extends Runnable> runnables = getNewMultiActionRunnable(server, multiAction,
+            numAttempt);
+        // make sure we correctly count the number of runnables before we try to reuse the send
+        // thread, in case we had to split the request into different runnables because of backoff
+        if (runnables.size() > actionsRemaining) {
+          actionsRemaining = runnables.size();
+        }
+
+        // run all the runnables
+        for (Runnable runnable : runnables) {
+          if ((--actionsRemaining == 0) && reuseThread) {
+            runnable.run();
+          } else {
+            try {
+              pool.submit(runnable);
+            } catch (RejectedExecutionException ree) {
+              // This should never happen. But as the pool is provided by the end user, let's secure
+              //  this a little.
+              decTaskCounters(multiAction.getRegions(), server);
+              LOG.warn("#" + id + ", the task was rejected by the pool. This is unexpected." +
+                  " Server is " + server.getServerName(), ree);
+              // We're likely to fail again, but this will increment the attempt counter, so it will
+              //  finish.
+              receiveGlobalFailure(multiAction, server, numAttempt, ree);
+            }
           }
         }
       }
+
       if (actionsForReplicaThread != null) {
         startWaitingForReplicaCalls(actionsForReplicaThread);
       }
+    }
+
+    private Collection<? extends Runnable> getNewMultiActionRunnable(ServerName server,
+        MultiAction<Row> multiAction,
+        int numAttempt) {
+      // no stats to manage, just do the standard action
+      if (AsyncProcess.this.connection.getStatisticsTracker() == null) {
+        return Collections.singletonList(Trace.wrap("AsyncProcess.sendMultiAction",
+            new SingleServerRequestRunnable(multiAction, numAttempt, server, callsInProgress)));
+      }
+
+      // group the actions by the amount of delay
+      Map<Long, DelayingRunner> actions = new HashMap<Long, DelayingRunner>(multiAction
+          .size());
+
+      // split up the actions
+      for (Map.Entry<byte[], List<Action<Row>>> e : multiAction.actions.entrySet()) {
+        Long backoff = getBackoff(server, e.getKey());
+        DelayingRunner runner = actions.get(backoff);
+        if (runner == null) {
+          actions.put(backoff, new DelayingRunner(backoff, e));
+        } else {
+          runner.add(e);
+        }
+      }
+
+      List<Runnable> toReturn = new ArrayList<Runnable>(actions.size());
+      for (DelayingRunner runner : actions.values()) {
+        String traceText = "AsyncProcess.sendMultiAction";
+        Runnable runnable =
+            new SingleServerRequestRunnable(runner.getActions(), numAttempt, server,
+                callsInProgress);
+        // use a delay runner only if we need to sleep for some time
+        if (runner.getSleepTime() > 0) {
+          runner.setRunner(runnable);
+          traceText = "AsyncProcess.clientBackoff.sendMultiAction";
+          runnable = runner;
+        }
+        runnable = Trace.wrap(traceText, runnable);
+        toReturn.add(runnable);
+
+      }
+      return toReturn;
+    }
+
+    /**
+     * @param server server location where the target region is hosted
+     * @param regionName name of the region which we are going to write some data
+     * @return the amount of time the client should wait until it submit a request to the
+     * specified server and region
+     */
+    private Long getBackoff(ServerName server, byte[] regionName) {
+      ServerStatisticTracker tracker = AsyncProcess.this.connection.getStatisticsTracker();
+      ServerStatistics stats = tracker.getStats(server);
+      return AsyncProcess.this.connection.getBackoffPolicy()
+          .getBackoffTime(server, regionName, stats);
     }
 
     /**
@@ -1169,6 +1261,13 @@ class AsyncProcess {
               ++failed;
             }
           } else {
+            // update the stats about the region, if its a user table. We don't want to slow down
+            // updates to meta tables, especially from internal updates (master, etc).
+            if (AsyncProcess.this.connection.getStatisticsTracker() != null) {
+              result = ResultStatsUtil.updateStats(result,
+                  AsyncProcess.this.connection.getStatisticsTracker(), server, regionName);
+            }
+
             if (callback != null) {
               try {
                 //noinspection unchecked
@@ -1272,11 +1371,11 @@ class AsyncProcess {
       if (results == null) {
          decActionCounter(index);
          return; // Simple case, no replica requests.
-      } else if ((state = trySetResultSimple(
-          index, action.getAction(), false, result, null, isStale)) == null) {
+      }
+      state = trySetResultSimple(index, action.getAction(), false, result, null, isStale);
+      if (state == null) {
         return; // Simple case, no replica requests.
       }
-      assert state != null;
       // At this point we know that state is set to replica tracking class.
       // It could be that someone else is also looking at it; however, we know there can
       // only be one state object, and only one thread can set callCount to 0. Other threads
@@ -1312,11 +1411,11 @@ class AsyncProcess {
         errors.add(throwable, row, server);
         decActionCounter(index);
         return; // Simple case, no replica requests.
-      } else if ((state = trySetResultSimple(
-          index, row, true, throwable, server, false)) == null) {
+      }
+      state = trySetResultSimple(index, row, true, throwable, server, false);
+      if (state == null) {
         return; // Simple case, no replica requests.
       }
-      assert state != null;
       BatchErrors target = null; // Error will be added to final errors, or temp replica errors.
       boolean isActionDone = false;
       synchronized (state) {
@@ -1382,7 +1481,8 @@ class AsyncProcess {
         results[index] = result;
       } else {
         synchronized (replicaResultLock) {
-          if ((resObj = results[index]) == null) {
+          resObj = results[index];
+          if (resObj == null) {
             if (isFromReplica) {
               throw new AssertionError("Unexpected stale result for " + row);
             }
@@ -1445,6 +1545,12 @@ class AsyncProcess {
         waitUntilDone(Long.MAX_VALUE);
       } catch (InterruptedException iex) {
         throw new InterruptedIOException(iex.getMessage());
+      } finally {
+        if (callsInProgress != null) {
+          for (MultiServerCallable<Row> clb : callsInProgress) {
+            clb.cancel();
+          }
+        }
       }
     }
 
@@ -1497,7 +1603,6 @@ class AsyncProcess {
       return results;
     }
   }
-
 
   @VisibleForTesting
   /** Create AsyncRequestFuture. Isolated to be easily overridden in the tests. */
@@ -1648,7 +1753,8 @@ class AsyncProcess {
   }
 
   /**
-   * For manageError. Only used to make logging more clear, we don't actually care why we don't retry.
+   * For {@link AsyncRequestFutureImpl#manageError(int, Row, Retry, Throwable, ServerName)}. Only
+   * used to make logging more clear, we don't actually care why we don't retry.
    */
   private enum Retry {
     YES,

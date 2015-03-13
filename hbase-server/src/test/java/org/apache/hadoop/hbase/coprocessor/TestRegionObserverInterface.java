@@ -112,7 +112,7 @@ public class TestRegionObserverInterface {
     util.shutdownMiniCluster();
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testRegionObserver() throws IOException {
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testRegionObserver");
     // recreate table every time in order to reset the status of the
@@ -176,7 +176,7 @@ public class TestRegionObserverInterface {
         new Integer[] {1, 1, 1, 1});
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testRowMutation() throws IOException {
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testRowMutation");
     Table table = util.createTable(tableName, new byte[][] {A, B, C});
@@ -213,7 +213,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testIncrementHook() throws IOException {
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testIncrementHook");
     Table table = util.createTable(tableName, new byte[][] {A, B, C});
@@ -240,16 +240,14 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testCheckAndPutHooks() throws IOException {
     TableName tableName =
         TableName.valueOf(TEST_TABLE.getNameAsString() + ".testCheckAndPutHooks");
-    Table table = util.createTable(tableName, new byte[][] {A, B, C});
-    try {
+    try (Table table = util.createTable(tableName, new byte[][] {A, B, C})) {
       Put p = new Put(Bytes.toBytes(0));
       p.add(A, A, A);
       table.put(p);
-      table.flushCommits();
       p = new Put(Bytes.toBytes(0));
       p.add(A, A, A);
       verifyMethodResult(SimpleRegionObserver.class,
@@ -267,11 +265,10 @@ public class TestRegionObserverInterface {
           );
     } finally {
       util.deleteTable(tableName);
-      table.close();
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testCheckAndDeleteHooks() throws IOException {
     TableName tableName =
         TableName.valueOf(TEST_TABLE.getNameAsString() + ".testCheckAndDeleteHooks");
@@ -280,7 +277,6 @@ public class TestRegionObserverInterface {
       Put p = new Put(Bytes.toBytes(0));
       p.add(A, A, A);
       table.put(p);
-      table.flushCommits();
       Delete d = new Delete(Bytes.toBytes(0));
       table.delete(d);
       verifyMethodResult(SimpleRegionObserver.class,
@@ -302,7 +298,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testAppendHook() throws IOException {
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testAppendHook");
     Table table = util.createTable(tableName, new byte[][] {A, B, C});
@@ -329,7 +325,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   // HBase-3583
   public void testHBase3583() throws IOException {
     TableName tableName =
@@ -344,7 +340,7 @@ public class TestRegionObserverInterface {
         new Boolean[] {false, false, false, false}
     );
 
-    Table table = new HTable(util.getConfiguration(), tableName);
+    Table table = util.getConnection().getTable(tableName);
     Put put = new Put(ROW);
     put.add(A, A, A);
     table.put(put);
@@ -381,7 +377,7 @@ public class TestRegionObserverInterface {
     table.close();
   }
 
-  @Test
+  @Test (timeout=300000)
   // HBase-3758
   public void testHBase3758() throws IOException {
     TableName tableName =
@@ -394,7 +390,7 @@ public class TestRegionObserverInterface {
         new Boolean[] {false, false}
     );
 
-    Table table = new HTable(util.getConfiguration(), tableName);
+    Table table = util.getConnection().getTable(tableName);
     Put put = new Put(ROW);
     put.add(A, A, A);
     table.put(put);
@@ -437,17 +433,24 @@ public class TestRegionObserverInterface {
         Store store, final InternalScanner scanner, final ScanType scanType) {
       return new InternalScanner() {
         @Override
-        public boolean next(List<Cell> results) throws IOException {
+        public NextState next(List<Cell> results) throws IOException {
           return next(results, -1);
         }
 
         @Override
-        public boolean next(List<Cell> results, int limit)
-            throws IOException{
+        public NextState next(List<Cell> results, int limit) throws IOException {
+          return next(results, limit, -1);
+        }
+
+        @Override
+        public NextState next(List<Cell> results, int limit, long remainingResultSize)
+            throws IOException {
           List<Cell> internalResults = new ArrayList<Cell>();
           boolean hasMore;
+          NextState state;
           do {
-            hasMore = scanner.next(internalResults, limit);
+            state = scanner.next(internalResults, limit, remainingResultSize);
+            hasMore = state != null && state.hasMoreValues();
             if (!internalResults.isEmpty()) {
               long row = Bytes.toLong(CellUtil.cloneValue(internalResults.get(0)));
               if (row % 2 == 0) {
@@ -462,7 +465,7 @@ public class TestRegionObserverInterface {
           if (!internalResults.isEmpty()) {
             results.addAll(internalResults);
           }
-          return hasMore;
+          return state;
         }
 
         @Override
@@ -487,7 +490,7 @@ public class TestRegionObserverInterface {
    * Tests overriding compaction handling via coprocessor hooks
    * @throws Exception
    */
-  @Test
+  @Test (timeout=300000)
   public void testCompactionOverride() throws Exception {
     TableName compactTable = TableName.valueOf("TestCompactionOverride");
     Admin admin = util.getHBaseAdmin();
@@ -501,7 +504,7 @@ public class TestRegionObserverInterface {
     htd.addCoprocessor(EvenOnlyCompactor.class.getName());
     admin.createTable(htd);
 
-    Table table = new HTable(util.getConfiguration(), compactTable);
+    Table table = util.getConnection().getTable(compactTable);
     for (long i=1; i<=10; i++) {
       byte[] iBytes = Bytes.toBytes(i);
       Put put = new Put(iBytes);
@@ -558,7 +561,7 @@ public class TestRegionObserverInterface {
     table.close();
   }
 
-  @Test
+  @Test (timeout=300000)
   public void bulkLoadHFileTest() throws Exception {
     String testName = TestRegionObserverInterface.class.getName()+".bulkLoadHFileTest";
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".bulkLoadHFileTest");
@@ -591,7 +594,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testRecovery() throws Exception {
     LOG.info(TestRegionObserverInterface.class.getName() +".testRecovery");
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testRecovery");
@@ -641,7 +644,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testLegacyRecovery() throws Exception {
     LOG.info(TestRegionObserverInterface.class.getName() +".testLegacyRecovery");
     TableName tableName = TableName.valueOf(TEST_TABLE.getNameAsString() + ".testLegacyRecovery");
@@ -691,7 +694,7 @@ public class TestRegionObserverInterface {
     }
   }
 
-  @Test
+  @Test (timeout=300000)
   public void testPreWALRestoreSkip() throws Exception {
     LOG.info(TestRegionObserverInterface.class.getName() + ".testPreWALRestoreSkip");
     TableName tableName = TableName.valueOf(SimpleRegionObserver.TABLE_SKIPPED);
@@ -776,5 +779,4 @@ public class TestRegionObserverInterface {
       writer.close();
     }
   }
-
 }

@@ -48,8 +48,6 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.HTableInterface;
 import org.apache.hadoop.hbase.client.HTableWrapper;
-import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CoprocessorClassLoader;
 import org.apache.hadoop.hbase.util.SortedCopyOnWriteSet;
 import org.apache.hadoop.hbase.util.VersionInfo;
@@ -75,6 +73,11 @@ public abstract class CoprocessorHost<E extends CoprocessorEnvironment> {
     "hbase.coprocessor.wal.classes";
   public static final String ABORT_ON_ERROR_KEY = "hbase.coprocessor.abortonerror";
   public static final boolean DEFAULT_ABORT_ON_ERROR = true;
+  public static final String COPROCESSORS_ENABLED_CONF_KEY = "hbase.coprocessor.enabled";
+  public static final boolean DEFAULT_COPROCESSORS_ENABLED = true;
+  public static final String USER_COPROCESSORS_ENABLED_CONF_KEY =
+    "hbase.coprocessor.user.enabled";
+  public static final boolean DEFAULT_USER_COPROCESSORS_ENABLED = true;
 
   private static final Log LOG = LogFactory.getLog(CoprocessorHost.class);
   protected Abortable abortable;
@@ -125,6 +128,12 @@ public abstract class CoprocessorHost<E extends CoprocessorEnvironment> {
    * Called by constructor.
    */
   protected void loadSystemCoprocessors(Configuration conf, String confKey) {
+    boolean coprocessorsEnabled = conf.getBoolean(COPROCESSORS_ENABLED_CONF_KEY,
+      DEFAULT_COPROCESSORS_ENABLED);
+    if (!coprocessorsEnabled) {
+      return;
+    }
+
     Class<?> implClass = null;
 
     // load default coprocessors from configure file
@@ -326,7 +335,7 @@ public abstract class CoprocessorHost<E extends CoprocessorEnvironment> {
     final ClassLoader systemClassLoader = this.getClass().getClassLoader();
     for (E env : coprocessors) {
       ClassLoader cl = env.getInstance().getClass().getClassLoader();
-      if (cl != systemClassLoader ){
+      if (cl != systemClassLoader){
         //do not include system classloader
         externalClassLoaders.add(cl);
       }
@@ -435,7 +444,7 @@ public abstract class CoprocessorHost<E extends CoprocessorEnvironment> {
         } catch (IOException e) {
           // nothing can be done here
           LOG.warn("Failed to close " +
-              Bytes.toStringBinary(table.getTableName()), e);
+              table.getName(), e);
         }
       }
     }

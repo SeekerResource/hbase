@@ -43,6 +43,8 @@ import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
@@ -50,23 +52,16 @@ import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
-import org.apache.hadoop.hbase.security.token.AuthenticationTokenIdentifier;
-import org.apache.hadoop.hbase.security.token.AuthenticationTokenSelector;
+import org.apache.hadoop.hbase.security.token.TokenUtil;
 import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.io.WritableComparable;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.Job;
-import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.zookeeper.KeeperException;
-
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.yammer.metrics.core.MetricsRegistry;
 
 /**
  * Utility for {@link TableMapper} and {@link TableReducer}
@@ -308,7 +303,7 @@ public class TableMapReduceUtil {
     conf.setFloat(
       HConstants.HFILE_BLOCK_CACHE_SIZE_KEY, HConstants.HFILE_BLOCK_CACHE_SIZE_DEFAULT);
     conf.setFloat(HConstants.BUCKET_CACHE_SIZE_KEY, 0f);
-    conf.setFloat("hbase.bucketcache.size", 0f);
+    conf.unset(HConstants.BUCKET_CACHE_IOENGINE_KEY);
   }
 
   /**
@@ -340,6 +335,7 @@ public class TableMapReduceUtil {
     TableSnapshotInputFormat.setInput(job, snapshotName, tmpRestoreDir);
     initTableMapperJob(snapshotName, scan, mapper, outputKeyClass,
         outputValueClass, job, addDependencyJars, false, TableSnapshotInputFormat.class);
+    addDependencyJars(job.getConfiguration(), MetricsRegistry.class);
     resetCacheConfig(job.getConfiguration());
   }
 
@@ -357,8 +353,8 @@ public class TableMapReduceUtil {
    */
   public static void initTableMapperJob(List<Scan> scans,
       Class<? extends TableMapper> mapper,
-      Class<? extends WritableComparable> outputKeyClass,
-      Class<? extends Writable> outputValueClass, Job job) throws IOException {
+      Class<?> outputKeyClass,
+      Class<?> outputValueClass, Job job) throws IOException {
     initTableMapperJob(scans, mapper, outputKeyClass, outputValueClass, job,
         true);
   }
@@ -379,8 +375,8 @@ public class TableMapReduceUtil {
    */
   public static void initTableMapperJob(List<Scan> scans,
       Class<? extends TableMapper> mapper,
-      Class<? extends WritableComparable> outputKeyClass,
-      Class<? extends Writable> outputValueClass, Job job,
+      Class<?> outputKeyClass,
+      Class<?> outputValueClass, Job job,
       boolean addDependencyJars) throws IOException {
     initTableMapperJob(scans, mapper, outputKeyClass, outputValueClass, job,
       addDependencyJars, true);
@@ -403,9 +399,9 @@ public class TableMapReduceUtil {
    */
   public static void initTableMapperJob(List<Scan> scans,
       Class<? extends TableMapper> mapper,
-      Class<? extends WritableComparable> outputKeyClass,
-      Class<? extends Writable> outputValueClass, Job job,
-      boolean addDependencyJars, 
+      Class<?> outputKeyClass,
+      Class<?> outputValueClass, Job job,
+      boolean addDependencyJars,
       boolean initCredentials) throws IOException {
     job.setInputFormatClass(MultiTableInputFormat.class);
     if (outputValueClass != null) {
@@ -452,10 +448,20 @@ public class TableMapReduceUtil {
         if (quorumAddress != null) {
           Configuration peerConf = HBaseConfiguration.create(job.getConfiguration());
           ZKUtil.applyClusterKeyToConf(peerConf, quorumAddress);
-          obtainAuthTokenForJob(job, peerConf, user);
+          Connection peerConn = ConnectionFactory.createConnection(peerConf);
+          try {
+            TokenUtil.addTokenForJob(peerConn, user, job);
+          } finally {
+            peerConn.close();
+          }
         }
 
-        obtainAuthTokenForJob(job, job.getConfiguration(), user);
+        Connection conn = ConnectionFactory.createConnection(job.getConfiguration());
+        try {
+          TokenUtil.addTokenForJob(conn, user, job);
+        } finally {
+          conn.close();
+        }
       } catch (InterruptedException ie) {
         LOG.info("Interrupted obtaining user authentication token");
         Thread.currentThread().interrupt();
@@ -481,38 +487,16 @@ public class TableMapReduceUtil {
       try {
         Configuration peerConf = HBaseConfiguration.create(job.getConfiguration());
         ZKUtil.applyClusterKeyToConf(peerConf, quorumAddress);
-        obtainAuthTokenForJob(job, peerConf, userProvider.getCurrent());
+        Connection peerConn = ConnectionFactory.createConnection(peerConf);
+        try {
+          TokenUtil.addTokenForJob(peerConn, userProvider.getCurrent(), job);
+        } finally {
+          peerConn.close();
+        }
       } catch (InterruptedException e) {
         LOG.info("Interrupted obtaining user authentication token");
         Thread.interrupted();
       }
-    }
-  }
-
-  private static void obtainAuthTokenForJob(Job job, Configuration conf, User user)
-      throws IOException, InterruptedException {
-    Token<AuthenticationTokenIdentifier> authToken = getAuthToken(conf, user);
-    if (authToken == null) {
-      user.obtainAuthTokenForJob(conf, job);
-    } else {
-      job.getCredentials().addToken(authToken.getService(), authToken);
-    }
-  }
-
-  /**
-   * Get the authentication token of the user for the cluster specified in the configuration
-   * @return null if the user does not have the token, otherwise the auth token for the cluster.
-   */
-  private static Token<AuthenticationTokenIdentifier> getAuthToken(Configuration conf, User user)
-      throws IOException, InterruptedException {
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(conf, "mr-init-credentials", null);
-    try {
-      String clusterId = ZKClusterId.readClusterIdZNode(zkw);
-      return new AuthenticationTokenSelector().selectToken(new Text(clusterId), user.getUGI().getTokens());
-    } catch (KeeperException e) {
-      throw new IOException(e);
-    } finally {
-      zkw.close();
     }
   }
 
@@ -744,7 +728,7 @@ public class TableMapReduceUtil {
       io.netty.channel.Channel.class,
       com.google.protobuf.Message.class,
       com.google.common.collect.Lists.class,
-      org.htrace.Trace.class);
+      org.apache.htrace.Trace.class);
   }
 
   /**
@@ -900,25 +884,28 @@ public class TableMapReduceUtil {
   private static String findContainingJar(Class<?> my_class, Map<String, String> packagedClasses)
       throws IOException {
     ClassLoader loader = my_class.getClassLoader();
+
     String class_file = my_class.getName().replaceAll("\\.", "/") + ".class";
 
-    // first search the classpath
-    for (Enumeration<URL> itr = loader.getResources(class_file); itr.hasMoreElements();) {
-      URL url = itr.nextElement();
-      if ("jar".equals(url.getProtocol())) {
-        String toReturn = url.getPath();
-        if (toReturn.startsWith("file:")) {
-          toReturn = toReturn.substring("file:".length());
+    if (loader != null) {
+      // first search the classpath
+      for (Enumeration<URL> itr = loader.getResources(class_file); itr.hasMoreElements();) {
+        URL url = itr.nextElement();
+        if ("jar".equals(url.getProtocol())) {
+          String toReturn = url.getPath();
+          if (toReturn.startsWith("file:")) {
+            toReturn = toReturn.substring("file:".length());
+          }
+          // URLDecoder is a misnamed class, since it actually decodes
+          // x-www-form-urlencoded MIME type rather than actual
+          // URL encoding (which the file path has). Therefore it would
+          // decode +s to ' 's which is incorrect (spaces are actually
+          // either unencoded or encoded as "%20"). Replace +s first, so
+          // that they are kept sacred during the decoding process.
+          toReturn = toReturn.replaceAll("\\+", "%2B");
+          toReturn = URLDecoder.decode(toReturn, "UTF-8");
+          return toReturn.replaceAll("!.*$", "");
         }
-        // URLDecoder is a misnamed class, since it actually decodes
-        // x-www-form-urlencoded MIME type rather than actual
-        // URL encoding (which the file path has). Therefore it would
-        // decode +s to ' 's which is incorrect (spaces are actually
-        // either unencoded or encoded as "%20"). Replace +s first, so
-        // that they are kept sacred during the decoding process.
-        toReturn = toReturn.replaceAll("\\+", "%2B");
-        toReturn = URLDecoder.decode(toReturn, "UTF-8");
-        return toReturn.replaceAll("!.*$", "");
       }
     }
 

@@ -32,14 +32,13 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 
-import javax.annotation.Nonnull;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.client.Durability;
+import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.BytesBytesPair;
@@ -130,6 +129,8 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   private static final Bytes MEMSTORE_FLUSHSIZE_KEY =
       new Bytes(Bytes.toBytes(MEMSTORE_FLUSHSIZE));
 
+  public static final String FLUSH_POLICY = "FLUSH_POLICY";
+
   /**
    * <em>INTERNAL</em> Used by rest interface to access this metadata
    * attribute which denotes if the table is a -ROOT- region or not
@@ -176,6 +177,14 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   private static final Bytes REGION_REPLICATION_KEY =
       new Bytes(Bytes.toBytes(REGION_REPLICATION));
 
+  /**
+   * <em>INTERNAL</em> flag to indicate whether or not the memstore should be replicated
+   * for read-replicas (CONSISTENCY => TIMELINE).
+   */
+  public static final String REGION_MEMSTORE_REPLICATION = "REGION_MEMSTORE_REPLICATION";
+  private static final Bytes REGION_MEMSTORE_REPLICATION_KEY =
+      new Bytes(Bytes.toBytes(REGION_MEMSTORE_REPLICATION));
+
   /** Default durability for HTD is USE_DEFAULT, which defaults to HBase-global default value */
   private static final Durability DEFAULT_DURABLITY = Durability.USE_DEFAULT;
 
@@ -209,6 +218,8 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   public static final long DEFAULT_MEMSTORE_FLUSH_SIZE = 1024*1024*128L;
 
   public static final int DEFAULT_REGION_REPLICATION = 1;
+
+  public static final boolean DEFAULT_REGION_MEMSTORE_REPLICATION = true;
 
   private final static Map<String, String> DEFAULT_VALUES
     = new HashMap<String, String>();
@@ -766,6 +777,28 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   }
 
   /**
+   * This sets the class associated with the flush policy which determines determines the stores
+   * need to be flushed when flushing a region. The class used by default is defined in
+   * {@link org.apache.hadoop.hbase.regionserver.FlushPolicy}
+   * @param clazz the class name
+   */
+  public HTableDescriptor setFlushPolicyClassName(String clazz) {
+    setValue(FLUSH_POLICY, clazz);
+    return this;
+  }
+
+  /**
+   * This gets the class associated with the flush policy which determines the stores need to be
+   * flushed when flushing a region. The class used by default is defined in
+   * {@link org.apache.hadoop.hbase.regionserver.FlushPolicy}
+   * @return the class name of the flush policy for this table. If this returns null, the default
+   *         flush policy is used.
+   */
+  public String getFlushPolicyClassName() {
+    return getValue(FLUSH_POLICY);
+  }
+
+  /**
    * Adds a column family.
    * For the updating purpose please use {@link #modifyFamily(HColumnDescriptor)} instead.
    * @param family HColumnDescriptor of family to add.
@@ -836,6 +869,13 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
       s.append(", ").append(hcd.toStringCustomizedValues());
     }
     return s.toString();
+  }
+
+  /**
+   * @return map of all table attributes formatted into string.
+   */
+  public String toStringTableAttributes() {
+   return getValues(true).toString();
   }
 
   private StringBuilder getValues(boolean printDefaults) {
@@ -973,10 +1013,10 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * This compares the content of the two descriptors and not the reference.
    *
    * @return 0 if the contents of the descriptors are exactly matching,
-   * 		 1 if there is a mismatch in the contents
+   *         1 if there is a mismatch in the contents
    */
   @Override
-  public int compareTo(@Nonnull final HTableDescriptor other) {
+  public int compareTo(final HTableDescriptor other) {
     int result = this.name.compareTo(other.name);
     if (result == 0) {
       result = families.size() - other.families.size();
@@ -1041,6 +1081,31 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   public HTableDescriptor setRegionReplication(int regionReplication) {
     setValue(REGION_REPLICATION_KEY,
         new Bytes(Bytes.toBytes(Integer.toString(regionReplication))));
+    return this;
+  }
+
+  /**
+   * @return true if the read-replicas memstore replication is enabled.
+   */
+  public boolean hasRegionMemstoreReplication() {
+    return isSomething(REGION_MEMSTORE_REPLICATION_KEY, DEFAULT_REGION_MEMSTORE_REPLICATION);
+  }
+
+  /**
+   * Enable or Disable the memstore replication from the primary region to the replicas.
+   * The replication will be used only for meta operations (e.g. flush, compaction, ...)
+   *
+   * @param memstoreReplication true if the new data written to the primary region
+   *                                 should be replicated.
+   *                            false if the secondaries can tollerate to have new
+   *                                  data only when the primary flushes the memstore.
+   */
+  public HTableDescriptor setRegionMemstoreReplication(boolean memstoreReplication) {
+    setValue(REGION_MEMSTORE_REPLICATION_KEY, memstoreReplication ? TRUE : FALSE);
+    // If the memstore replication is setup, we do not have to wait for observing a flush event
+    // from primary before starting to serve reads, because gaps from replication is not applicable
+    setConfiguration(RegionReplicaUtil.REGION_REPLICA_WAIT_FOR_PRIMARY_FLUSH_CONF_KEY,
+      Boolean.toString(memstoreReplication));
     return this;
   }
 
@@ -1303,6 +1368,17 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
               .setBloomFilterType(BloomType.NONE)
               // Enable cache of data blocks in L1 if more than one caching tier deployed:
               // e.g. if using CombinedBlockCache (BucketCache).
+              .setCacheDataInL1(true),
+          new HColumnDescriptor(HConstants.TABLE_FAMILY)
+              // Ten is arbitrary number.  Keep versions to help debugging.
+              .setMaxVersions(10)
+              .setInMemory(true)
+              .setBlocksize(8 * 1024)
+              .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
+                  // Disable blooms for meta.  Needs work.  Seems to mess w/ getClosestOrBefore.
+              .setBloomFilterType(BloomType.NONE)
+                  // Enable cache of data blocks in L1 if more than one caching tier deployed:
+                  // e.g. if using CombinedBlockCache (BucketCache).
               .setCacheDataInL1(true)
       });
 

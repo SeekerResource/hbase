@@ -38,15 +38,16 @@ import org.apache.hadoop.hbase.IntegrationTestingUtility;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.chaos.factories.MonkeyFactory;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.BufferedMutator;
+import org.apache.hadoop.hbase.client.BufferedMutatorParams;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.mapreduce.Import;
@@ -128,7 +129,8 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
     protected void createSchema() throws IOException {
       LOG.info("Creating tables");
       // Create three tables
-      boolean acl = AccessControlClient.isAccessControllerRunning(getConf());
+      boolean acl = AccessControlClient.isAccessControllerRunning(ConnectionFactory
+          .createConnection(getConf()));
       if(!acl) {
         LOG.info("No ACL available.");
       }
@@ -156,8 +158,8 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
           LOG.info("Granting permissions for user " + USER.getShortName());
           Permission.Action[] actions = { Permission.Action.READ };
           try {
-            AccessControlClient.grant(getConf(), tableName, USER.getShortName(), null, null,
-                actions);
+            AccessControlClient.grant(ConnectionFactory.createConnection(getConf()), tableName,
+                USER.getShortName(), null, null, actions);
           } catch (Throwable e) {
             LOG.fatal("Error in granting permission for the user " + USER.getShortName(), e);
             throw new IOException(e);
@@ -172,8 +174,7 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
     }
 
     static class VisibilityGeneratorMapper extends GeneratorMapper {
-      Table[] tables = new Table[DEFAULT_TABLES_COUNT];
-      Table commonTable = null;
+      BufferedMutator[] tables = new BufferedMutator[DEFAULT_TABLES_COUNT];
 
       @Override
       protected void setup(org.apache.hadoop.mapreduce.Mapper.Context context) throws IOException,
@@ -182,11 +183,11 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
       }
 
       @Override
-      protected void instantiateHTable(Configuration conf) throws IOException {
+      protected void instantiateHTable() throws IOException {
         for (int i = 0; i < DEFAULT_TABLES_COUNT; i++) {
-          HTable table = new HTable(conf, getTableName(i));
-          table.setAutoFlushTo(true);
-          //table.setWriteBufferSize(4 * 1024 * 1024);
+          BufferedMutatorParams params = new BufferedMutatorParams(getTableName(i));
+          params.writeBufferSize(4 * 1024 * 1024);
+          BufferedMutator table = connection.getBufferedMutator(params);
           this.tables[i] = table;
         }
       }
@@ -219,7 +220,7 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
             }
             visibilityExps = split[j * 2] + OR + split[(j * 2) + 1];
             put.setCellVisibility(new CellVisibility(visibilityExps));
-            tables[j].put(put);
+            tables[j].mutate(put);
             try {
               Thread.sleep(1);
             } catch (InterruptedException e) {
@@ -230,9 +231,6 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
             // Tickle progress every so often else maprunner will think us hung
             output.progress();
           }
-        }
-        for (int j = 0; j < DEFAULT_TABLES_COUNT; j++) {
-          tables[j].flushCommits();
         }
       }
     }
@@ -583,8 +581,8 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
       if (args.length < 5) {
         System.err
             .println("Usage: Loop <num iterations> " +
-            		"<num mappers> <num nodes per mapper> <output dir> " +
-            		"<num reducers> [<width> <wrap multiplier>]");
+                "<num mappers> <num nodes per mapper> <output dir> " +
+                "<num reducers> [<width> <wrap multiplier>]");
         return 1;
       }
       LOG.info("Running Loop with args:" + Arrays.deepToString(args));

@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.client;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -40,14 +41,25 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.InvalidFamilyOperationException;
+import org.apache.hadoop.hbase.MasterNotRunningException;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
+import org.apache.hadoop.hbase.ZooKeeperConnectionException;
+import org.apache.hadoop.hbase.exceptions.MergeRegionException;
+import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.protobuf.RequestConverter;
+import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.DispatchMergingRegionsRequest;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -55,6 +67,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import com.google.protobuf.ServiceException;
 
 /**
  * Class to test HBaseAdmin.
@@ -235,7 +249,8 @@ public class TestAdmin1 {
     this.admin.disableTable(ht.getName());
     assertTrue("Table must be disabled.", TEST_UTIL.getHBaseCluster()
         .getMaster().getAssignmentManager().getTableStateManager().isTableState(
-        ht.getName(), TableState.State.DISABLED));
+            ht.getName(), TableState.State.DISABLED));
+    assertEquals(TableState.State.DISABLED, getStateFromMeta(table));
 
     // Test that table is disabled
     get = new Get(row);
@@ -262,7 +277,8 @@ public class TestAdmin1 {
     this.admin.enableTable(table);
     assertTrue("Table must be enabled.", TEST_UTIL.getHBaseCluster()
         .getMaster().getAssignmentManager().getTableStateManager().isTableState(
-        ht.getName(), TableState.State.ENABLED));
+            ht.getName(), TableState.State.ENABLED));
+    assertEquals(TableState.State.ENABLED, getStateFromMeta(table));
 
     // Test that table is enabled
     try {
@@ -272,6 +288,13 @@ public class TestAdmin1 {
     }
     assertTrue(ok);
     ht.close();
+  }
+
+  private TableState.State getStateFromMeta(TableName table) throws IOException {
+    TableState state =
+        MetaTableAccessor.getTableState(TEST_UTIL.getConnection(), table);
+    assertNotNull(state);
+    return state.getState();
   }
 
   @Test (timeout=300000)
@@ -305,6 +328,10 @@ public class TestAdmin1 {
       ok = true;
     }
 
+    assertEquals(TableState.State.DISABLED, getStateFromMeta(table1));
+    assertEquals(TableState.State.DISABLED, getStateFromMeta(table2));
+
+
     assertTrue(ok);
     this.admin.enableTables("testDisableAndEnableTable.*");
 
@@ -323,18 +350,23 @@ public class TestAdmin1 {
 
     ht1.close();
     ht2.close();
+
+    assertEquals(TableState.State.ENABLED, getStateFromMeta(table1));
+    assertEquals(TableState.State.ENABLED, getStateFromMeta(table2));
   }
 
   @Test (timeout=300000)
   public void testCreateTable() throws IOException {
     HTableDescriptor [] tables = admin.listTables();
     int numTables = tables.length;
-    TEST_UTIL.createTable(TableName.valueOf("testCreateTable"), HConstants.CATALOG_FAMILY).close();
+    TableName tableName = TableName.valueOf("testCreateTable");
+    TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY).close();
     tables = this.admin.listTables();
     assertEquals(numTables + 1, tables.length);
     assertTrue("Table must be enabled.", TEST_UTIL.getHBaseCluster()
         .getMaster().getAssignmentManager().getTableStateManager().isTableState(
-        TableName.valueOf("testCreateTable"), TableState.State.ENABLED));
+            tableName, TableState.State.ENABLED));
+    assertEquals(TableState.State.ENABLED, getStateFromMeta(tableName));
   }
 
   @Test (timeout=300000)
@@ -354,7 +386,7 @@ public class TestAdmin1 {
     splitKeys[1] = Bytes.toBytes(8);
 
     // Create & Fill the table
-    HTable table = TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY, splitKeys);
+    Table table = TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY, splitKeys);
     try {
       TEST_UTIL.loadNumericRows(table, HConstants.CATALOG_FAMILY, 0, 10);
       assertEquals(10, TEST_UTIL.countRows(table));
@@ -366,7 +398,7 @@ public class TestAdmin1 {
     // Truncate & Verify
     this.admin.disableTable(tableName);
     this.admin.truncateTable(tableName, preserveSplits);
-    table = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    table = TEST_UTIL.getConnection().getTable(tableName);
     try {
       assertEquals(0, TEST_UTIL.countRows(table));
     } finally {
@@ -389,9 +421,62 @@ public class TestAdmin1 {
     htd.addFamily(fam2);
     htd.addFamily(fam3);
     this.admin.createTable(htd);
-    Table table = new HTable(TEST_UTIL.getConfiguration(), htd.getTableName());
+    Table table = TEST_UTIL.getConnection().getTable(htd.getTableName());
     HTableDescriptor confirmedHtd = table.getTableDescriptor();
     assertEquals(htd.compareTo(confirmedHtd), 0);
+    MetaTableAccessor.fullScanMetaAndPrint(TEST_UTIL.getConnection());
+    table.close();
+  }
+
+  @Test (timeout=300000)
+  public void testCompactionTimestamps() throws Exception {
+    HColumnDescriptor fam1 = new HColumnDescriptor("fam1");
+    TableName tableName = TableName.valueOf("testCompactionTimestampsTable");
+    HTableDescriptor htd = new HTableDescriptor(tableName);
+    htd.addFamily(fam1);
+    this.admin.createTable(htd);
+    HTable table = (HTable)TEST_UTIL.getConnection().getTable(htd.getTableName());
+    long ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    assertEquals(0, ts);
+    Put p = new Put(Bytes.toBytes("row1"));
+    p.add(Bytes.toBytes("fam1"), Bytes.toBytes("fam1"), Bytes.toBytes("fam1"));
+    table.put(p);
+    ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    // no files written -> no data
+    assertEquals(0, ts);
+
+    this.admin.flush(tableName);
+    ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    // still 0, we flushed a file, but no major compaction happened
+    assertEquals(0, ts);
+
+    byte[] regionName =
+        table.getRegionLocator().getAllRegionLocations().get(0).getRegionInfo().getRegionName();
+    long ts1 = this.admin.getLastMajorCompactionTimestampForRegion(regionName);
+    assertEquals(ts, ts1);
+    p = new Put(Bytes.toBytes("row2"));
+    p.add(Bytes.toBytes("fam1"), Bytes.toBytes("fam1"), Bytes.toBytes("fam1"));
+    table.put(p);
+    this.admin.flush(tableName);
+    ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    // make sure the region API returns the same value, as the old file is still around
+    assertEquals(ts1, ts);
+
+    TEST_UTIL.compact(tableName, true);
+    table.put(p);
+    // forces a wait for the compaction
+    this.admin.flush(tableName);
+    ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    // after a compaction our earliest timestamp will have progressed forward
+    assertTrue(ts > ts1);
+
+    // region api still the same
+    ts1 = this.admin.getLastMajorCompactionTimestampForRegion(regionName);
+    assertEquals(ts, ts1);
+    table.put(p);
+    this.admin.flush(tableName);
+    ts = this.admin.getLastMajorCompactionTimestamp(tableName);
+    assertEquals(ts, ts1);
     table.close();
   }
 
@@ -572,7 +657,7 @@ public class TestAdmin1 {
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc);
-    HTable ht = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    HTable ht = (HTable) TEST_UTIL.getConnection().getTable(tableName);
     Map<HRegionInfo, ServerName> regions = ht.getRegionLocations();
     assertEquals("Table should have only 1 region", 1, regions.size());
     ht.close();
@@ -581,7 +666,7 @@ public class TestAdmin1 {
     desc = new HTableDescriptor(TABLE_2);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc, new byte[][]{new byte[]{42}});
-    HTable ht2 = new HTable(TEST_UTIL.getConfiguration(), TABLE_2);
+    HTable ht2 = (HTable) TEST_UTIL.getConnection().getTable(TABLE_2);
     regions = ht2.getRegionLocations();
     assertEquals("Table should have only 2 region", 2, regions.size());
     ht2.close();
@@ -590,7 +675,7 @@ public class TestAdmin1 {
     desc = new HTableDescriptor(TABLE_3);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc, "a".getBytes(), "z".getBytes(), 3);
-    HTable ht3 = new HTable(TEST_UTIL.getConfiguration(), TABLE_3);
+    HTable ht3 = (HTable) TEST_UTIL.getConnection().getTable(TABLE_3);
     regions = ht3.getRegionLocations();
     assertEquals("Table should have only 3 region", 3, regions.size());
     ht3.close();
@@ -609,7 +694,7 @@ public class TestAdmin1 {
     desc = new HTableDescriptor(TABLE_5);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc, new byte[] {1}, new byte[] {127}, 16);
-    HTable ht5 = new HTable(TEST_UTIL.getConfiguration(), TABLE_5);
+    HTable ht5 = (HTable) TEST_UTIL.getConnection().getTable(TABLE_5);
     regions = ht5.getRegionLocations();
     assertEquals("Table should have 16 region", 16, regions.size());
     ht5.close();
@@ -640,7 +725,7 @@ public class TestAdmin1 {
     boolean tableAvailable = admin.isTableAvailable(tableName, splitKeys);
     assertTrue("Table should be created with splitKyes + 1 rows in META", tableAvailable);
 
-    HTable ht = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    HTable ht = (HTable) TEST_UTIL.getConnection().getTable(tableName);
     Map<HRegionInfo, ServerName> regions = ht.getRegionLocations();
     assertEquals("Tried to create " + expectedRegions + " regions " +
         "but only found " + regions.size(),
@@ -697,10 +782,10 @@ public class TestAdmin1 {
 
     desc = new HTableDescriptor(TABLE_2);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
-    admin = new HBaseAdmin(TEST_UTIL.getConfiguration());
+    admin = TEST_UTIL.getHBaseAdmin();
     admin.createTable(desc, startKey, endKey, expectedRegions);
 
-    HTable ht2 = new HTable(TEST_UTIL.getConfiguration(), TABLE_2);
+    HTable ht2 = (HTable) TEST_UTIL.getConnection().getTable(TABLE_2);
     regions = ht2.getRegionLocations();
     assertEquals("Tried to create " + expectedRegions + " regions " +
         "but only found " + regions.size(),
@@ -753,11 +838,11 @@ public class TestAdmin1 {
 
     desc = new HTableDescriptor(TABLE_3);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
-    admin = new HBaseAdmin(TEST_UTIL.getConfiguration());
+    admin = TEST_UTIL.getHBaseAdmin();
     admin.createTable(desc, startKey, endKey, expectedRegions);
 
 
-    HTable ht3 = new HTable(TEST_UTIL.getConfiguration(), TABLE_3);
+    HTable ht3 = (HTable) TEST_UTIL.getConnection().getTable(TABLE_3);
     regions = ht3.getRegionLocations();
     assertEquals("Tried to create " + expectedRegions + " regions " +
         "but only found " + regions.size(),
@@ -779,15 +864,13 @@ public class TestAdmin1 {
     TableName TABLE_4 = TableName.valueOf(tableName.getNameAsString() + "_4");
     desc = new HTableDescriptor(TABLE_4);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
-    Admin ladmin = new HBaseAdmin(TEST_UTIL.getConfiguration());
     try {
-      ladmin.createTable(desc, splitKeys);
+      admin.createTable(desc, splitKeys);
       assertTrue("Should not be able to create this table because of " +
           "duplicate split keys", false);
     } catch(IllegalArgumentException iae) {
       // Expected
     }
-    ladmin.close();
   }
 
   @Test (timeout=300000)
@@ -880,7 +963,7 @@ public class TestAdmin1 {
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc, splitKeys);
-    HTable ht = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    HTable ht = (HTable) TEST_UTIL.getConnection().getTable(tableName);
     Map<HRegionInfo, ServerName> regions = ht.getRegionLocations();
     assertEquals("Tried to create " + expectedRegions + " regions "
         + "but only found " + regions.size(), expectedRegions, regions.size());
@@ -1069,6 +1152,126 @@ public class TestAdmin1 {
     table.close();
   }
 
+  @Test
+  public void testSplitAndMergeWithReplicaTable() throws Exception {
+    // The test tries to directly split replica regions and directly merge replica regions. These
+    // are not allowed. The test validates that. Then the test does a valid split/merge of allowed
+    // regions.
+    // Set up a table with 3 regions and replication set to 3
+    TableName tableName = TableName.valueOf("testSplitAndMergeWithReplicaTable");
+    HTableDescriptor desc = new HTableDescriptor(tableName);
+    desc.setRegionReplication(3);
+    byte[] cf = "f".getBytes();
+    HColumnDescriptor hcd = new HColumnDescriptor(cf);
+    desc.addFamily(hcd);
+    byte[][] splitRows = new byte[2][];
+    splitRows[0] = new byte[]{(byte)'4'};
+    splitRows[1] = new byte[]{(byte)'7'};
+    TEST_UTIL.getHBaseAdmin().createTable(desc, splitRows);
+    List<HRegion> oldRegions;
+    do {
+      oldRegions = TEST_UTIL.getHBaseCluster().getRegions(tableName);
+      Thread.sleep(10);
+    } while (oldRegions.size() != 9); //3 regions * 3 replicas
+    // write some data to the table
+    HTable ht = (HTable) TEST_UTIL.getConnection().getTable(tableName);
+    List<Put> puts = new ArrayList<Put>();
+    byte[] qualifier = "c".getBytes();
+    Put put = new Put(new byte[]{(byte)'1'});
+    put.add(cf, qualifier, "100".getBytes());
+    puts.add(put);
+    put = new Put(new byte[]{(byte)'6'});
+    put.add(cf, qualifier, "100".getBytes());
+    puts.add(put);
+    put = new Put(new byte[]{(byte)'8'});
+    put.add(cf, qualifier, "100".getBytes());
+    puts.add(put);
+    ht.put(puts);
+    ht.flushCommits();
+    ht.close();
+    List<Pair<HRegionInfo, ServerName>> regions =
+        MetaTableAccessor.getTableRegionsAndLocations(TEST_UTIL.getConnection(), tableName);
+    boolean gotException = false;
+    // the element at index 1 would be a replica (since the metareader gives us ordered
+    // regions). Try splitting that region via the split API . Should fail
+    try {
+      TEST_UTIL.getHBaseAdmin().split(regions.get(1).getFirst().getRegionName());
+    } catch (IllegalArgumentException ex) {
+      gotException = true;
+    }
+    assertTrue(gotException);
+    gotException = false;
+    // the element at index 1 would be a replica (since the metareader gives us ordered
+    // regions). Try splitting that region via a different split API (the difference is
+    // this API goes direct to the regionserver skipping any checks in the admin). Should fail
+    try {
+      TEST_UTIL.getHBaseAdmin().split(regions.get(1).getSecond(), regions.get(1).getFirst(),
+          new byte[]{(byte)'1'});
+    } catch (IOException ex) {
+      gotException = true;
+    }
+    assertTrue(gotException);
+    gotException = false;
+    // Try merging a replica with another. Should fail.
+    try {
+      TEST_UTIL.getHBaseAdmin().mergeRegions(regions.get(1).getFirst().getEncodedNameAsBytes(),
+          regions.get(2).getFirst().getEncodedNameAsBytes(), true);
+    } catch (IllegalArgumentException m) {
+      gotException = true;
+    }
+    assertTrue(gotException);
+    // Try going to the master directly (that will skip the check in admin)
+    try {
+      DispatchMergingRegionsRequest request = RequestConverter
+          .buildDispatchMergingRegionsRequest(regions.get(1).getFirst().getEncodedNameAsBytes(),
+              regions.get(2).getFirst().getEncodedNameAsBytes(), true);
+      TEST_UTIL.getHBaseAdmin().getConnection().getMaster().dispatchMergingRegions(null, request);
+    } catch (ServiceException m) {
+      Throwable t = m.getCause();
+      do {
+        if (t instanceof MergeRegionException) {
+          gotException = true;
+          break;
+        }
+        t = t.getCause();
+      } while (t != null);
+    }
+    assertTrue(gotException);
+    gotException = false;
+    // Try going to the regionservers directly
+    // first move the region to the same regionserver
+    if (!regions.get(2).getSecond().equals(regions.get(1).getSecond())) {
+      moveRegionAndWait(regions.get(2).getFirst(), regions.get(1).getSecond());
+    }
+    try {
+      AdminService.BlockingInterface admin = TEST_UTIL.getHBaseAdmin().getConnection()
+          .getAdmin(regions.get(1).getSecond());
+      ProtobufUtil.mergeRegions(admin, regions.get(1).getFirst(), regions.get(2).getFirst(), true);
+    } catch (MergeRegionException mm) {
+      gotException = true;
+    }
+    assertTrue(gotException);
+  }
+
+  private void moveRegionAndWait(HRegionInfo destRegion, ServerName destServer)
+      throws InterruptedException, MasterNotRunningException,
+      ZooKeeperConnectionException, IOException {
+    HMaster master = TEST_UTIL.getMiniHBaseCluster().getMaster();
+    TEST_UTIL.getHBaseAdmin().move(
+        destRegion.getEncodedNameAsBytes(),
+        Bytes.toBytes(destServer.getServerName()));
+    while (true) {
+      ServerName serverName = master.getAssignmentManager()
+          .getRegionStates().getRegionServerOfRegion(destRegion);
+      if (serverName != null && serverName.equals(destServer)) {
+        TEST_UTIL.assertRegionOnServer(
+            destRegion, serverName, 200);
+        break;
+      }
+      Thread.sleep(10);
+    }
+  }
+
   /**
    * HADOOP-2156
    * @throws IOException
@@ -1094,7 +1297,7 @@ public class TestAdmin1 {
     }
     this.admin.disableTable(tableName);
     try {
-      new HTable(TEST_UTIL.getConfiguration(), tableName);
+      TEST_UTIL.getConnection().getTable(tableName);
     } catch (org.apache.hadoop.hbase.DoNotRetryIOException e) {
       //expected
     }

@@ -23,7 +23,6 @@ import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.KeyValue;
 
 /**
  * A scanner allows you to position yourself within a HFile and
@@ -132,7 +131,7 @@ public interface HFileScanner {
    */
   ByteBuffer getValue();
   /**
-   * @return Instance of {@link KeyValue}.
+   * @return Instance of {@link org.apache.hadoop.hbase.KeyValue}.
    */
   Cell getKeyValue();
   /**
@@ -157,4 +156,9 @@ public interface HFileScanner {
    * Otherwise returns false.
    */
   boolean isSeeked();
+
+  /**
+   * @return the next key in the index (the key to seek to the next block)
+   */
+  Cell getNextIndexedKey();
 }

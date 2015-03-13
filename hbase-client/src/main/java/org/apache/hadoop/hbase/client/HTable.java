@@ -22,10 +22,8 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
@@ -46,7 +44,7 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.RegionLocations;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
@@ -108,17 +106,14 @@ import com.google.protobuf.ServiceException;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Stable
-public class HTable implements HTableInterface, RegionLocator {
+public class HTable implements HTableInterface {
   private static final Log LOG = LogFactory.getLog(HTable.class);
   protected ClusterConnection connection;
   private final TableName tableName;
   private volatile Configuration configuration;
   private TableConfiguration tableConfiguration;
-  protected List<Row> writeAsyncBuffer = new LinkedList<Row>();
-  private long writeBufferSize;
-  private boolean clearBufferOnFail = true;
+  protected BufferedMutatorImpl mutator;
   private boolean autoFlush = true;
-  protected long currentWriteBufferSize = 0 ;
   private boolean closed = false;
   protected int scannerCaching;
   private ExecutorService pool;  // For Multi & Scan
@@ -126,9 +121,8 @@ public class HTable implements HTableInterface, RegionLocator {
   private final boolean cleanupPoolOnClose; // shutdown the pool in close()
   private final boolean cleanupConnectionOnClose; // close the connection in close()
   private Consistency defaultConsistency = Consistency.STRONG;
+  private HRegionLocator locator;
 
-  /** The Async process for puts with autoflush set to false or multiputs */
-  protected AsyncProcess ap;
   /** The Async process for batch */
   protected AsyncProcess multiAp;
   private RpcRetryingCallerFactory rpcCallerFactory;
@@ -174,12 +168,13 @@ public class HTable implements HTableInterface, RegionLocator {
   public HTable(Configuration conf, final TableName tableName)
   throws IOException {
     this.tableName = tableName;
-    this.cleanupPoolOnClose = this.cleanupConnectionOnClose = true;
+    this.cleanupPoolOnClose = true;
+    this.cleanupConnectionOnClose = true;
     if (conf == null) {
       this.connection = null;
       return;
     }
-    this.connection = ConnectionManager.getConnectionInternal(conf);
+    this.connection = (ClusterConnection) ConnectionFactory.createConnection(conf);
     this.configuration = conf;
 
     this.pool = getDefaultExecutor(conf);
@@ -220,7 +215,7 @@ public class HTable implements HTableInterface, RegionLocator {
     // it also scales when new region servers are added.
     ThreadPoolExecutor pool = new ThreadPoolExecutor(1, maxThreads, keepAliveTime, TimeUnit.SECONDS,
         new SynchronousQueue<Runnable>(), Threads.newDaemonThreadFactory("htable"));
-    ((ThreadPoolExecutor) pool).allowCoreThreadTimeOut(true);
+    pool.allowCoreThreadTimeOut(true);
     return pool;
   }
 
@@ -251,7 +246,7 @@ public class HTable implements HTableInterface, RegionLocator {
   @Deprecated
   public HTable(Configuration conf, final TableName tableName, final ExecutorService pool)
       throws IOException {
-    this.connection = ConnectionManager.getConnectionInternal(conf);
+    this.connection = (ClusterConnection) ConnectionFactory.createConnection(conf);
     this.configuration = conf;
     this.pool = pool;
     if (pool == null) {
@@ -324,15 +319,18 @@ public class HTable implements HTableInterface, RegionLocator {
   }
 
   /**
-   * For internal testing.
-   * @throws IOException 
+   * For internal testing. Uses Connection provided in {@code params}.
+   * @throws IOException
    */
   @VisibleForTesting
-  protected HTable() throws IOException {
-    tableName = null;
-    tableConfiguration = new TableConfiguration();
+  protected HTable(ClusterConnection conn, BufferedMutatorParams params) throws IOException {
+    connection = conn;
+    tableName = params.getTableName();
+    tableConfiguration = new TableConfiguration(connection.getConfiguration());
     cleanupPoolOnClose = false;
     cleanupConnectionOnClose = false;
+    // used from tests, don't trust the connection is real
+    this.mutator = new BufferedMutatorImpl(conn, null, null, params);
   }
 
   /**
@@ -352,10 +350,6 @@ public class HTable implements HTableInterface, RegionLocator {
 
     this.operationTimeout = tableName.isSystemTable() ?
         tableConfiguration.getMetaOperationTimeout() : tableConfiguration.getOperationTimeout();
-    this.writeBufferSize = tableConfiguration.getWriteBufferSize();
-    this.clearBufferOnFail = true;
-    this.autoFlush = true;
-    this.currentWriteBufferSize = 0;
     this.scannerCaching = tableConfiguration.getScannerCaching();
 
     if (this.rpcCallerFactory == null) {
@@ -366,10 +360,8 @@ public class HTable implements HTableInterface, RegionLocator {
     }
 
     // puts need to track errors globally due to how the APIs currently work.
-    ap = new AsyncProcess(connection, configuration, pool, rpcCallerFactory, true, rpcControllerFactory);
     multiAp = this.connection.getAsyncProcess();
-
-    this.closed = false;
+    this.locator = new HRegionLocator(getName(), connection);
   }
 
   /**
@@ -428,7 +420,7 @@ public class HTable implements HTableInterface, RegionLocator {
    * @param tableName Name of table to check.
    * @return {@code true} if table is online.
    * @throws IOException if a remote or network exception occurs
-	 * @deprecated use {@link HBaseAdmin#isTableEnabled(byte[])}
+   * @deprecated use {@link HBaseAdmin#isTableEnabled(byte[])}
    */
   @Deprecated
   public static boolean isTableEnabled(Configuration conf, String tableName)
@@ -442,7 +434,7 @@ public class HTable implements HTableInterface, RegionLocator {
    * @param tableName Name of table to check.
    * @return {@code true} if table is online.
    * @throws IOException if a remote or network exception occurs
-	 * @deprecated use {@link HBaseAdmin#isTableEnabled(byte[])}
+   * @deprecated use {@link HBaseAdmin#isTableEnabled(byte[])}
    */
   @Deprecated
   public static boolean isTableEnabled(Configuration conf, byte[] tableName)
@@ -479,25 +471,25 @@ public class HTable implements HTableInterface, RegionLocator {
   @Deprecated
   public HRegionLocation getRegionLocation(final String row)
   throws IOException {
-    return connection.getRegionLocation(tableName, Bytes.toBytes(row), false);
+    return getRegionLocation(Bytes.toBytes(row), false);
   }
 
   /**
-   * {@inheritDoc}
+   * @deprecated Use {@link RegionLocator#getRegionLocation(byte[])} instead.
    */
-  @Override
+  @Deprecated
   public HRegionLocation getRegionLocation(final byte [] row)
   throws IOException {
-    return connection.getRegionLocation(tableName, row, false);
+    return locator.getRegionLocation(row);
   }
 
   /**
-   * {@inheritDoc}
+   * @deprecated Use {@link RegionLocator#getRegionLocation(byte[], boolean)} instead.
    */
-  @Override
+  @Deprecated
   public HRegionLocation getRegionLocation(final byte [] row, boolean reload)
   throws IOException {
-    return connection.getRegionLocation(tableName, row, reload);
+    return locator.getRegionLocation(row, reload);
   }
 
   /**
@@ -543,7 +535,7 @@ public class HTable implements HTableInterface, RegionLocator {
    */
   @Deprecated
   public List<Row> getWriteBuffer() {
-    return writeAsyncBuffer;
+    return mutator == null ? null : mutator.getWriteBuffer();
   }
 
   /**
@@ -603,45 +595,27 @@ public class HTable implements HTableInterface, RegionLocator {
   }
 
   /**
-   * {@inheritDoc}
+   * @deprecated Use {@link RegionLocator#getStartEndKeys()} instead;
    */
-  @Override
+  @Deprecated
   public byte [][] getStartKeys() throws IOException {
-    return getStartEndKeys().getFirst();
+    return locator.getStartKeys();
   }
 
   /**
-   * {@inheritDoc}
+   * @deprecated Use {@link RegionLocator#getEndKeys()} instead;
    */
-  @Override
+  @Deprecated
   public byte[][] getEndKeys() throws IOException {
-    return getStartEndKeys().getSecond();
+    return locator.getEndKeys();
   }
 
   /**
-   * {@inheritDoc}
+   * @deprecated Use {@link RegionLocator#getStartEndKeys()} instead;
    */
-  @Override
+  @Deprecated
   public Pair<byte[][],byte[][]> getStartEndKeys() throws IOException {
-
-    List<RegionLocations> regions = listRegionLocations();
-    final List<byte[]> startKeyList = new ArrayList<byte[]>(regions.size());
-    final List<byte[]> endKeyList = new ArrayList<byte[]>(regions.size());
-
-    for (RegionLocations locations : regions) {
-      HRegionInfo region = locations.getRegionLocation().getRegionInfo();
-      startKeyList.add(region.getStartKey());
-      endKeyList.add(region.getEndKey());
-    }
-
-    return new Pair<byte [][], byte [][]>(
-      startKeyList.toArray(new byte[startKeyList.size()][]),
-      endKeyList.toArray(new byte[endKeyList.size()][]));
-  }
-
-  @VisibleForTesting
-  List<RegionLocations> listRegionLocations() throws IOException {
-    return MetaScanner.listTableRegionLocations(getConfiguration(), this.connection, getName());
+    return locator.getStartEndKeys();
   }
 
   /**
@@ -652,10 +626,12 @@ public class HTable implements HTableInterface, RegionLocator {
    * @throws IOException if a remote or network exception occurs
    * @deprecated This is no longer a public API.  Use {@link #getAllRegionLocations()} instead.
    */
+  @SuppressWarnings("deprecation")
   @Deprecated
   public NavigableMap<HRegionInfo, ServerName> getRegionLocations() throws IOException {
-    // TODO: Odd that this returns a Map of HRI to SN whereas getRegionLocator, singular, returns an HRegionLocation.
-    return MetaScanner.allTableRegions(getConfiguration(), this.connection, getName());
+    // TODO: Odd that this returns a Map of HRI to SN whereas getRegionLocator, singular,
+    // returns an HRegionLocation.
+    return MetaTableAccessor.allTableRegions(this.connection, getName());
   }
 
   /**
@@ -664,15 +640,12 @@ public class HTable implements HTableInterface, RegionLocator {
    * This is mainly useful for the MapReduce integration.
    * @return A map of HRegionInfo with it's server address
    * @throws IOException if a remote or network exception occurs
+   *
+   * @deprecated Use {@link RegionLocator#getAllRegionLocations()} instead;
    */
-  @Override
+  @Deprecated
   public List<HRegionLocation> getAllRegionLocations() throws IOException {
-    NavigableMap<HRegionInfo, ServerName> locations = getRegionLocations();
-    ArrayList<HRegionLocation> regions = new ArrayList<>(locations.size());
-    for (Entry<HRegionInfo, ServerName> entry : locations.entrySet()) {
-      regions.add(new HRegionLocation(entry.getKey(), entry.getValue()));
-    }
-    return regions;
+    return locator.getAllRegionLocations();
   }
 
   /**
@@ -800,6 +773,9 @@ public class HTable implements HTableInterface, RegionLocator {
    */
   @Override
   public ResultScanner getScanner(final Scan scan) throws IOException {
+    if (scan.getBatch() > 0 && scan.isSmall()) {
+      throw new IllegalArgumentException("Small scan should not be used with batching");
+    }
     if (scan.getCaching() <= 0) {
       scan.setCaching(getScannerCaching());
     }
@@ -958,7 +934,7 @@ public class HTable implements HTableInterface, RegionLocator {
    * {@inheritDoc}
    * @deprecated If any exception is thrown by one of the actions, there is no way to
    * retrieve the partially executed results. Use
-   * {@link #batchCallback(List, Object[], org.apache.hadoop.hbase.client.coprocessor.Batch.Callback)}
+   * {@link #batchCallback(List, Object[], Batch.Callback)}
    * instead.
    */
   @Deprecated
@@ -1011,8 +987,8 @@ public class HTable implements HTableInterface, RegionLocator {
       throw (InterruptedIOException)new InterruptedIOException().initCause(e);
     } finally {
       // mutate list so that it is empty for complete success, or contains only failed records
-      // results are returned in the same order as the requests in list
-      // walk the list backwards, so we can remove from list without impacting the indexes of earlier members
+      // results are returned in the same order as the requests in list walk the list backwards,
+      // so we can remove from list without impacting the indexes of earlier members
       for (int i = results.length - 1; i>=0; i--) {
         // if result is not null, it succeeded
         if (results[i] instanceof Result) {
@@ -1024,11 +1000,11 @@ public class HTable implements HTableInterface, RegionLocator {
 
   /**
    * {@inheritDoc}
+   * @throws IOException
    */
   @Override
-  public void put(final Put put)
-      throws InterruptedIOException, RetriesExhaustedWithDetailsException {
-    doPut(put);
+  public void put(final Put put) throws IOException {
+    getBufferedMutator().mutate(put);
     if (autoFlush) {
       flushCommits();
     }
@@ -1036,80 +1012,13 @@ public class HTable implements HTableInterface, RegionLocator {
 
   /**
    * {@inheritDoc}
+   * @throws IOException
    */
   @Override
-  public void put(final List<Put> puts)
-      throws InterruptedIOException, RetriesExhaustedWithDetailsException {
-    for (Put put : puts) {
-      doPut(put);
-    }
+  public void put(final List<Put> puts) throws IOException {
+    getBufferedMutator().mutate(puts);
     if (autoFlush) {
       flushCommits();
-    }
-  }
-
-
-  /**
-   * Add the put to the buffer. If the buffer is already too large, sends the buffer to the
-   *  cluster.
-   * @throws RetriesExhaustedWithDetailsException if there is an error on the cluster.
-   * @throws InterruptedIOException if we were interrupted.
-   */
-  private void doPut(Put put) throws InterruptedIOException, RetriesExhaustedWithDetailsException {
-    // This behavior is highly non-intuitive... it does not protect us against
-    // 94-incompatible behavior, which is a timing issue because hasError, the below code
-    // and setter of hasError are not synchronized. Perhaps it should be removed.
-    if (ap.hasError()) {
-      writeAsyncBuffer.add(put);
-      backgroundFlushCommits(true);
-    }
-
-    validatePut(put);
-
-    currentWriteBufferSize += put.heapSize();
-    writeAsyncBuffer.add(put);
-
-    while (currentWriteBufferSize > writeBufferSize) {
-      backgroundFlushCommits(false);
-    }
-  }
-
-
-  /**
-   * Send the operations in the buffer to the servers. Does not wait for the server's answer.
-   * If the is an error (max retried reach from a previous flush or bad operation), it tries to
-   * send all operations in the buffer and sends an exception.
-   * @param synchronous - if true, sends all the writes and wait for all of them to finish before
-   *                     returning.
-   */
-  private void backgroundFlushCommits(boolean synchronous) throws
-      InterruptedIOException, RetriesExhaustedWithDetailsException {
-
-    try {
-      if (!synchronous) {
-        ap.submit(tableName, writeAsyncBuffer, true, null, false);
-        if (ap.hasError()) {
-          LOG.debug(tableName + ": One or more of the operations have failed -" +
-              " waiting for all operation in progress to finish (successfully or not)");
-        }
-      }
-      if (synchronous || ap.hasError()) {
-        while (!writeAsyncBuffer.isEmpty()) {
-          ap.submit(tableName, writeAsyncBuffer, true, null, false);
-        }
-        List<Row> failedRows = clearBufferOnFail ? null : writeAsyncBuffer;
-        RetriesExhaustedWithDetailsException error = ap.waitForAllPreviousOpsAndReset(failedRows);
-        if (error != null) {
-          throw error;
-        }
-      }
-    } finally {
-      currentWriteBufferSize = 0;
-      for (Row mut : writeAsyncBuffer) {
-        if (mut instanceof Mutation) {
-          currentWriteBufferSize += ((Mutation) mut).heapSize();
-        }
-      }
     }
   }
 
@@ -1131,7 +1040,15 @@ public class HTable implements HTableInterface, RegionLocator {
           regionMutationBuilder.setAtomic(true);
           MultiRequest request =
             MultiRequest.newBuilder().addRegionAction(regionMutationBuilder.build()).build();
-          getStub().multi(controller, request);
+          ClientProtos.MultiResponse response = getStub().multi(controller, request);
+          ClientProtos.RegionActionResult res = response.getRegionActionResultList().get(0);
+          if (res.hasException()) {
+            Throwable ex = ProtobufUtil.toException(res.getException());
+            if(ex instanceof IOException) {
+              throw (IOException)ex;
+            }
+            throw new IOException("Failed to mutate row: "+Bytes.toStringBinary(rm.getRow()), ex);
+          }
         } catch (ServiceException se) {
           throw ProtobufUtil.getRemoteException(se);
         }
@@ -1289,7 +1206,7 @@ public class HTable implements HTableInterface, RegionLocator {
           controller.setCallTimeout(callTimeout);
           try {
             MutateRequest request = RequestConverter.buildMutateRequest(
-              getLocation().getRegionInfo().getRegionName(), row, family, qualifier,
+                getLocation().getRegionInfo().getRegionName(), row, family, qualifier,
                 new BinaryComparator(value), CompareType.EQUAL, put);
             MutateResponse response = getStub().mutate(controller, request);
             return Boolean.valueOf(response.getProcessed());
@@ -1410,6 +1327,15 @@ public class HTable implements HTableInterface, RegionLocator {
                   getLocation().getRegionInfo().getRegionName(), row, family, qualifier,
                   new BinaryComparator(value), compareType, rm);
               ClientProtos.MultiResponse response = getStub().multi(controller, request);
+              ClientProtos.RegionActionResult res = response.getRegionActionResultList().get(0);
+              if (res.hasException()) {
+                Throwable ex = ProtobufUtil.toException(res.getException());
+                if(ex instanceof IOException) {
+                  throw (IOException)ex;
+                }
+                throw new IOException("Failed to checkAndMutate row: "+
+                    Bytes.toStringBinary(rm.getRow()), ex);
+              }
               return Boolean.valueOf(response.getProcessed());
             } catch (ServiceException se) {
               throw ProtobufUtil.getRemoteException(se);
@@ -1462,6 +1388,7 @@ public class HTable implements HTableInterface, RegionLocator {
 
   /**
    * {@inheritDoc}
+   * @deprecated Use {@link #existsAll(java.util.List)}  instead.
    */
   @Override
   @Deprecated
@@ -1476,12 +1403,15 @@ public class HTable implements HTableInterface, RegionLocator {
 
   /**
    * {@inheritDoc}
+   * @throws IOException
    */
   @Override
-  public void flushCommits() throws InterruptedIOException, RetriesExhaustedWithDetailsException {
-    // As we can have an operation in progress even if the buffer is empty, we call
-    //  backgroundFlushCommits at least one time.
-    backgroundFlushCommits(true);
+  public void flushCommits() throws IOException {
+    if (mutator == null) {
+      // nothing to flush if there's no mutator; don't bother creating one.
+      return;
+    }
+    getBufferedMutator().flush();
   }
 
   /**
@@ -1527,6 +1457,7 @@ public class HTable implements HTableInterface, RegionLocator {
           terminated = this.pool.awaitTermination(60, TimeUnit.SECONDS);
         } while (!terminated);
       } catch (InterruptedException e) {
+        this.pool.shutdownNow();
         LOG.warn("waitForTermination interrupted");
       }
     }
@@ -1569,11 +1500,15 @@ public class HTable implements HTableInterface, RegionLocator {
 
   /**
    * {@inheritDoc}
+   * @deprecated in 0.96. When called with setAutoFlush(false), this function also
+   *  set clearBufferOnFail to true, which is unexpected but kept for historical reasons.
+   *  Replace it with setAutoFlush(false, false) if this is exactly what you want, or by
+   *  {@link #setAutoFlushTo(boolean)} for all other cases.
    */
   @Deprecated
   @Override
   public void setAutoFlush(boolean autoFlush) {
-    setAutoFlush(autoFlush, autoFlush);
+    this.autoFlush = autoFlush;
   }
 
   /**
@@ -1581,7 +1516,7 @@ public class HTable implements HTableInterface, RegionLocator {
    */
   @Override
   public void setAutoFlushTo(boolean autoFlush) {
-    setAutoFlush(autoFlush, clearBufferOnFail);
+    this.autoFlush = autoFlush;
   }
 
   /**
@@ -1590,7 +1525,6 @@ public class HTable implements HTableInterface, RegionLocator {
   @Override
   public void setAutoFlush(boolean autoFlush, boolean clearBufferOnFail) {
     this.autoFlush = autoFlush;
-    this.clearBufferOnFail = autoFlush || clearBufferOnFail;
   }
 
   /**
@@ -1602,7 +1536,11 @@ public class HTable implements HTableInterface, RegionLocator {
    */
   @Override
   public long getWriteBufferSize() {
-    return writeBufferSize;
+    if (mutator == null) {
+      return tableConfiguration.getWriteBufferSize();
+    } else {
+      return mutator.getWriteBufferSize();
+    }
   }
 
   /**
@@ -1615,10 +1553,8 @@ public class HTable implements HTableInterface, RegionLocator {
    */
   @Override
   public void setWriteBufferSize(long writeBufferSize) throws IOException {
-    this.writeBufferSize = writeBufferSize;
-    if(currentWriteBufferSize > writeBufferSize) {
-      flushCommits();
-    }
+    getBufferedMutator();
+    mutator.setWriteBufferSize(writeBufferSize);
   }
 
   /**
@@ -1799,9 +1735,8 @@ public class HTable implements HTableInterface, RegionLocator {
             + Bytes.toStringBinary(e.getKey()), ee);
         throw ee.getCause();
       } catch (InterruptedException ie) {
-        throw new InterruptedIOException("Interrupted calling coprocessor service " + service.getName()
-            + " for row " + Bytes.toStringBinary(e.getKey()))
-            .initCause(ie);
+        throw new InterruptedIOException("Interrupted calling coprocessor service "
+            + service.getName() + " for row " + Bytes.toStringBinary(e.getKey())).initCause(ie);
       }
     }
   }
@@ -1895,8 +1830,9 @@ public class HTable implements HTableInterface, RegionLocator {
 
     AsyncProcess asyncProcess =
         new AsyncProcess(connection, configuration, pool,
-            RpcRetryingCallerFactory.instantiate(configuration), true,
-            RpcControllerFactory.instantiate(configuration));
+            RpcRetryingCallerFactory.instantiate(configuration, connection.getStatisticsTracker()),
+            true, RpcControllerFactory.instantiate(configuration));
+
     AsyncRequestFuture future = asyncProcess.submitAll(tableName, execs,
         new Callback<ClientProtos.CoprocessorServiceResult>() {
           @Override
@@ -1930,5 +1866,22 @@ public class HTable implements HTableInterface, RegionLocator {
       throw new RetriesExhaustedWithDetailsException(callbackErrorExceptions, callbackErrorActions,
           callbackErrorServers);
     }
+  }
+
+  public RegionLocator getRegionLocator() {
+    return this.locator;
+  }
+
+  @VisibleForTesting
+  BufferedMutator getBufferedMutator() throws IOException {
+    if (mutator == null) {
+      this.mutator = (BufferedMutatorImpl) connection.getBufferedMutator(
+          new BufferedMutatorParams(tableName)
+              .pool(pool)
+              .writeBufferSize(tableConfiguration.getWriteBufferSize())
+              .maxKeyValueSize(tableConfiguration.getMaxKeyValueSize())
+      );
+    }
+    return mutator;
   }
 }

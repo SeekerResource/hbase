@@ -208,6 +208,9 @@ public class TestRegionSplitter {
                 xFF, xFF, xFF}, lastRow);
         assertArrayEquals(splitPoint,
                 new byte[] {(byte)0xef, xFF, xFF, xFF, xFF, xFF, xFF, xFF});
+
+        splitPoint = splitter.split(new byte[] {'a', 'a', 'a'}, new byte[] {'a', 'a', 'b'});
+        assertArrayEquals(splitPoint, new byte[] {'a', 'a', 'a', (byte)0x80 });
     }
 
   @Test
@@ -228,7 +231,7 @@ public class TestRegionSplitter {
     assertTrue(splitFailsPrecondition(algo, "\\xAA", "\\xAA")); // range error
     assertFalse(splitFailsPrecondition(algo, "\\x00", "\\x02", 3)); // should be fine
     assertFalse(splitFailsPrecondition(algo, "\\x00", "\\x0A", 11)); // should be fine
-    assertTrue(splitFailsPrecondition(algo, "\\x00", "\\x0A", 12)); // too granular
+    assertFalse(splitFailsPrecondition(algo, "\\x00", "\\x0A", 12)); // should be fine
   }
 
   private boolean splitFailsPrecondition(SplitAlgorithm algo) {
@@ -307,9 +310,8 @@ public class TestRegionSplitter {
     private void verifyBounds(List<byte[]> expectedBounds, TableName tableName)
             throws Exception {
         // Get region boundaries from the cluster and verify their endpoints
-        final Configuration conf = UTIL.getConfiguration();
         final int numRegions = expectedBounds.size()-1;
-        final HTable hTable = new HTable(conf, tableName);
+        final HTable hTable = (HTable) UTIL.getConnection().getTable(tableName);
         final Map<HRegionInfo, ServerName> regionInfoMap = hTable.getRegionLocations();
         assertEquals(numRegions, regionInfoMap.size());
         for (Map.Entry<HRegionInfo, ServerName> entry: regionInfoMap.entrySet()) {

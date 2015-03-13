@@ -63,6 +63,7 @@ import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
@@ -369,7 +370,7 @@ public class AccessControlLists {
       while (true) {
         List<Cell> row = new ArrayList<Cell>();
 
-        boolean hasNext = iScanner.next(row);
+        boolean hasNext = NextState.hasMoreValues(iScanner.next(row));
         ListMultimap<String,TablePermission> perms = ArrayListMultimap.create();
         byte[] entry = null;
         for (Cell kv : row) {
@@ -639,6 +640,13 @@ public class AccessControlLists {
     }
 
     return aclKey.substring(GROUP_PREFIX.length());
+  }
+
+  /**
+   * Returns the group entry with the group prefix for a group principal.
+   */
+  public static String toGroupEntry(String name) {
+    return GROUP_PREFIX + name;
   }
 
   public static boolean isNamespaceEntry(String entryName) {

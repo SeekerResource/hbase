@@ -43,6 +43,8 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
@@ -183,6 +185,23 @@ public class TestImportTsv implements Configurable {
         table
     };
 
+    util.createTable(TableName.valueOf(table), FAMILY);
+    doMROnTableTest(util, FAMILY, null, args, 3);
+    util.deleteTable(table);
+  }
+  
+  @Test
+  public void testBulkOutputWithAnExistingTableNoStrictTrue() throws Exception {
+    String table = "test-" + UUID.randomUUID();
+    // Prepare the arguments required for the test.
+    Path hfiles = new Path(util.getDataTestDirOnTestFS(table), "hfiles");
+    String[] args = new String[] {
+        "-D" + ImportTsv.COLUMNS_CONF_KEY + "=HBASE_ROW_KEY,FAM:A,FAM:B",
+        "-D" + ImportTsv.SEPARATOR_CONF_KEY + "=\u001b",
+        "-D" + ImportTsv.BULK_OUTPUT_CONF_KEY + "=" + hfiles.toString(),
+        "-D" + ImportTsv.NO_STRICT_COL_FAMILY + "=true",
+        table
+    };
     util.createTable(TableName.valueOf(table), FAMILY);
     doMROnTableTest(util, FAMILY, null, args, 3);
     util.deleteTable(table);
@@ -329,7 +348,8 @@ public class TestImportTsv implements Configurable {
       String family, int valueMultiplier) throws IOException {
 
     LOG.debug("Validating table.");
-    Table table = new HTable(conf, tableName);
+    Connection connection = ConnectionFactory.createConnection(conf);
+    Table table = connection.getTable(tableName);
     boolean verified = false;
     long pause = conf.getLong("hbase.client.pause", 5 * 1000);
     int numRetries = conf.getInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 5);
@@ -361,6 +381,7 @@ public class TestImportTsv implements Configurable {
       }
     }
     table.close();
+    connection.close();
     assertTrue(verified);
   }
 

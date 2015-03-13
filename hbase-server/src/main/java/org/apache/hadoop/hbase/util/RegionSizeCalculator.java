@@ -68,7 +68,7 @@ public class RegionSizeCalculator {
   public RegionSizeCalculator(HTable table) throws IOException {
     HBaseAdmin admin = new HBaseAdmin(table.getConfiguration());
     try {
-      init(table, admin);
+      init(table.getRegionLocator(), admin);
     } finally {
       admin.close();
     }
@@ -85,6 +85,11 @@ public class RegionSizeCalculator {
       throws IOException {
     if (!enabled(admin.getConfiguration())) {
       LOG.info("Region size calculation disabled.");
+      return;
+    }
+
+    if (regionLocator.getName().isSystemTable()) {
+      LOG.info("Region size calculation disabled for system tables.");
       return;
     }
 

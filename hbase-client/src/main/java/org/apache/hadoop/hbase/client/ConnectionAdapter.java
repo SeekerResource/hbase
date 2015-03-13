@@ -30,6 +30,7 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.backoff.ClientBackoffPolicy;
 import org.apache.hadoop.hbase.client.coprocessor.Batch.Callback;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.ClientService;
@@ -38,7 +39,7 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MasterService;
 /**
  * An internal class that delegates to an {@link HConnection} instance.
  * A convenience to override when customizing method implementations.
- * 
+ *
  *
  * @see ConnectionUtils#createShortCircuitHConnection(HConnection, ServerName,
  * AdminService.BlockingInterface, ClientService.BlockingInterface) for case where we make
@@ -109,6 +110,17 @@ abstract class ConnectionAdapter implements ClusterConnection {
   }
 
   @Override
+  public BufferedMutator getBufferedMutator(BufferedMutatorParams params)
+      throws IOException {
+    return wrappedConnection.getBufferedMutator(params);
+  }
+
+  @Override
+  public BufferedMutator getBufferedMutator(TableName tableName) throws IOException {
+    return wrappedConnection.getBufferedMutator(tableName);
+  }
+
+  @Override
   public RegionLocator getRegionLocator(TableName tableName) throws IOException {
     return wrappedConnection.getRegionLocator(tableName);
   }
@@ -174,11 +186,6 @@ abstract class ConnectionAdapter implements ClusterConnection {
   @Override
   public HTableDescriptor[] listTables() throws IOException {
     return wrappedConnection.listTables();
-  }
-
-  @Override
-  public HTableDescriptor[] listTables(String regex) throws IOException {
-    return wrappedConnection.listTables(regex);
   }
 
   @Override
@@ -446,5 +453,20 @@ abstract class ConnectionAdapter implements ClusterConnection {
   @Override
   public RpcRetryingCallerFactory getNewRpcRetryingCallerFactory(Configuration conf) {
     return wrappedConnection.getNewRpcRetryingCallerFactory(conf);
+  }
+  
+  @Override
+  public boolean isManaged() {
+    return wrappedConnection.isManaged();
+  }
+
+  @Override
+  public ServerStatisticTracker getStatisticsTracker() {
+    return wrappedConnection.getStatisticsTracker();
+  }
+
+  @Override
+  public ClientBackoffPolicy getBackoffPolicy() {
+    return wrappedConnection.getBackoffPolicy();
   }
 }

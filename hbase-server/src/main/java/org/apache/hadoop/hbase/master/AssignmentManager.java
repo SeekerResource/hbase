@@ -54,7 +54,6 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.RegionLocations;
-import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
@@ -64,8 +63,8 @@ import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.executor.EventHandler;
 import org.apache.hadoop.hbase.executor.EventType;
 import org.apache.hadoop.hbase.executor.ExecutorService;
+import org.apache.hadoop.hbase.ipc.FailedServerException;
 import org.apache.hadoop.hbase.ipc.RpcClient;
-import org.apache.hadoop.hbase.ipc.RpcClient.FailedServerException;
 import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.master.RegionState.State;
 import org.apache.hadoop.hbase.master.balancer.FavoredNodeAssignmentHelper;
@@ -74,6 +73,7 @@ import org.apache.hadoop.hbase.master.handler.DisableTableHandler;
 import org.apache.hadoop.hbase.master.handler.EnableTableHandler;
 import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
 import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.quotas.RegionStateListener;
 import org.apache.hadoop.hbase.regionserver.RegionOpeningState;
 import org.apache.hadoop.hbase.regionserver.RegionServerStoppedException;
 import org.apache.hadoop.hbase.wal.DefaultWALProvider;
@@ -85,6 +85,7 @@ import org.apache.hadoop.hbase.util.PairOfSameType;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.zookeeper.KeeperException;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -97,7 +98,7 @@ import com.google.common.annotations.VisibleForTesting;
 public class AssignmentManager {
   private static final Log LOG = LogFactory.getLog(AssignmentManager.class);
 
-  protected final Server server;
+  protected final MasterServices server;
 
   private ServerManager serverManager;
 
@@ -128,8 +129,8 @@ public class AssignmentManager {
   private final int maximumAttempts;
 
   /**
-   * The sleep time for which the assignment will wait before retrying in case of hbase:meta assignment
-   * failure due to lack of availability of region plan or bad region plan
+   * The sleep time for which the assignment will wait before retrying in case of
+   * hbase:meta assignment failure due to lack of availability of region plan or bad region plan
    */
   private final long sleepTimeBeforeRetryingMetaAssignment;
 
@@ -193,6 +194,8 @@ public class AssignmentManager {
 
   /** Listeners that are called on assignment events. */
   private List<AssignmentListener> listeners = new CopyOnWriteArrayList<AssignmentListener>();
+  
+  private RegionStateListener regionStateListener;
 
   /**
    * Constructs a new assignment manager.
@@ -205,7 +208,7 @@ public class AssignmentManager {
    * @param tableLockManager TableLock manager
    * @throws IOException
    */
-  public AssignmentManager(Server server, ServerManager serverManager,
+  public AssignmentManager(MasterServices server, ServerManager serverManager,
       final LoadBalancer balancer,
       final ExecutorService service, MetricsMaster metricsMaster,
       final TableLockManager tableLockManager,
@@ -450,8 +453,9 @@ public class AssignmentManager {
         Map<String, RegionState> regionsInTransition = regionStates.getRegionsInTransition();
         if (!regionsInTransition.isEmpty()) {
           for (RegionState regionState: regionsInTransition.values()) {
+            ServerName serverName = regionState.getServerName();
             if (!regionState.getRegion().isMetaRegion()
-                && onlineServers.contains(regionState.getServerName())) {
+                && serverName != null && onlineServers.contains(serverName)) {
               LOG.debug("Found " + regionState + " in RITs");
               failover = true;
               break;
@@ -1004,18 +1008,6 @@ public class AssignmentManager {
           regionStates.updateRegionState(region, State.FAILED_OPEN);
           return;
         }
-        // In case of assignment from EnableTableHandler table state is ENABLING. Any how
-        // EnableTableHandler will set ENABLED after assigning all the table regions. If we
-        // try to set to ENABLED directly then client API may think table is enabled.
-        // When we have a case such as all the regions are added directly into hbase:meta and we call
-        // assignRegion then we need to make the table ENABLED. Hence in such case the table
-        // will not be in ENABLING or ENABLED state.
-        TableName tableName = region.getTable();
-        if (!tableStateManager.isTableState(tableName,
-          TableState.State.ENABLED, TableState.State.ENABLING)) {
-          LOG.debug("Setting table " + tableName + " to ENABLED state.");
-          setEnabledTable(tableName);
-        }
         LOG.info("Assigning " + region.getRegionNameAsString() +
             " to " + plan.getDestination().toString());
         // Transition RegionState to PENDING_OPEN
@@ -1376,14 +1368,15 @@ public class AssignmentManager {
   }
 
   /**
-   * Assigns the hbase:meta region.
+   * Assigns the hbase:meta region or a replica.
    * <p>
    * Assumes that hbase:meta is currently closed and is not being actively served by
    * any RegionServer.
+   * @param hri TODO
    */
-  public void assignMeta() throws KeeperException {
-    regionStates.updateRegionState(HRegionInfo.FIRST_META_REGIONINFO, State.OFFLINE);
-    assign(HRegionInfo.FIRST_META_REGIONINFO);
+  public void assignMeta(HRegionInfo hri) throws KeeperException {
+    regionStates.updateRegionState(hri, State.OFFLINE);
+    assign(hri);
   }
 
   /**
@@ -1564,7 +1557,7 @@ public class AssignmentManager {
             TableState.State.ENABLING);
 
     // Region assignment from META
-    List<Result> results = MetaTableAccessor.fullScanOfMeta(server.getConnection());
+    List<Result> results = MetaTableAccessor.fullScanRegions(server.getConnection());
     // Get any new but slow to checkin region server that joined the cluster
     Set<ServerName> onlineServers = serverManager.getOnlineServers().keySet();
     // Set of offline servers to be returned
@@ -1694,18 +1687,23 @@ public class AssignmentManager {
   /**
    * Processes list of regions in transition at startup
    */
-  void processRegionsInTransition(Collection<RegionState> regionStates) {
+  void processRegionsInTransition(Collection<RegionState> regionsInTransition) {
     // We need to send RPC call again for PENDING_OPEN/PENDING_CLOSE regions
     // in case the RPC call is not sent out yet before the master was shut down
     // since we update the state before we send the RPC call. We can't update
     // the state after the RPC call. Otherwise, we don't know what's happened
     // to the region if the master dies right after the RPC call is out.
-    for (RegionState regionState: regionStates) {
-      if (!serverManager.isServerOnline(regionState.getServerName())) {
+    for (RegionState regionState: regionsInTransition) {
+      LOG.info("Processing " + regionState);
+      ServerName serverName = regionState.getServerName();
+      // Server could be null in case of FAILED_OPEN when master cannot find a region plan. In that
+      // case, try assigning it here.
+      if (serverName != null && !serverManager.getOnlineServers().containsKey(serverName)) {
+        LOG.info("Server " + serverName + " isn't online. SSH will handle this");
         continue; // SSH will handle it
       }
+      HRegionInfo regionInfo = regionState.getRegion();
       RegionState.State state = regionState.getState();
-      LOG.info("Processing " + regionState);
       switch (state) {
       case CLOSED:
         invokeAssign(regionState.getRegion());
@@ -1715,6 +1713,10 @@ public class AssignmentManager {
         break;
       case PENDING_CLOSE:
         retrySendRegionClose(regionState);
+        break;
+      case FAILED_CLOSE:
+      case FAILED_OPEN:
+        invokeUnAssign(regionInfo);
         break;
       default:
         // No process for other states
@@ -1952,6 +1954,15 @@ public class AssignmentManager {
 
   public boolean isCarryingMeta(ServerName serverName) {
     return isCarryingRegion(serverName, HRegionInfo.FIRST_META_REGIONINFO);
+  }
+
+  public boolean isCarryingMetaReplica(ServerName serverName, int replicaId) {
+    return isCarryingRegion(serverName,
+        RegionReplicaUtil.getRegionInfoForReplica(HRegionInfo.FIRST_META_REGIONINFO, replicaId));
+  }
+
+  public boolean isCarryingMetaReplica(ServerName serverName, HRegionInfo metaHri) {
+    return isCarryingRegion(serverName, metaHri);
   }
 
   /**
@@ -2748,7 +2759,12 @@ public class AssignmentManager {
         errorMsg = onRegionClosed(current, hri, serverName);
         break;
       case READY_TO_SPLIT:
-        errorMsg = onRegionReadyToSplit(current, hri, serverName, transition);
+        try {
+          regionStateListener.onRegionSplit(hri);
+          errorMsg = onRegionReadyToSplit(current, hri, serverName, transition);
+        } catch (IOException exp) {
+          errorMsg = StringUtils.stringifyException(exp);
+        }
         break;
       case SPLIT_PONR:
         errorMsg = onRegionSplitPONR(current, hri, serverName, transition);
@@ -2758,6 +2774,13 @@ public class AssignmentManager {
         break;
       case SPLIT_REVERTED:
         errorMsg = onRegionSplitReverted(current, hri, serverName, transition);
+        if (org.apache.commons.lang.StringUtils.isEmpty(errorMsg)) {
+          try {
+            regionStateListener.onRegionSplitReverted(hri);
+          } catch (IOException exp) {
+            LOG.warn(StringUtils.stringifyException(exp));
+          }
+        }
         break;
       case READY_TO_MERGE:
         errorMsg = onRegionReadyToMerge(current, hri, serverName, transition);
@@ -2766,7 +2789,12 @@ public class AssignmentManager {
         errorMsg = onRegionMergePONR(current, hri, serverName, transition);
         break;
       case MERGED:
-        errorMsg = onRegionMerged(current, hri, serverName, transition);
+        try {
+          errorMsg = onRegionMerged(current, hri, serverName, transition);
+          regionStateListener.onRegionMerged(hri);
+        } catch (IOException exp) {
+          errorMsg = StringUtils.stringifyException(exp);
+        }
         break;
       case MERGE_REVERTED:
         errorMsg = onRegionMergeReverted(current, hri, serverName, transition);
@@ -2795,5 +2823,9 @@ public class AssignmentManager {
   public Map<ServerName, List<HRegionInfo>>
     getSnapShotOfAssignment(Collection<HRegionInfo> infos) {
     return getRegionStates().getRegionAssignments(infos);
+  }
+
+  void setRegionStateListener(RegionStateListener listener) {
+    this.regionStateListener = listener;
   }
 }

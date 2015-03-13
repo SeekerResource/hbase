@@ -18,6 +18,7 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
@@ -60,8 +61,6 @@ import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
-import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitorBase;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
 import org.apache.hadoop.hbase.ipc.MasterCoprocessorRpcChannel;
@@ -83,6 +82,7 @@ import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.UpdateConfiguratio
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.NameStringPair;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.ProcedureDescription;
+import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.RegionSpecifierType;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.TableSchema;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.AddColumnRequest;
@@ -115,6 +115,8 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsSnapshotDoneRes
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListNamespaceDescriptorsRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableDescriptorsByNamespaceRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ListTableNamesByNamespaceRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MajorCompactionTimestampForRegionRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.MajorCompactionTimestampRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyColumnRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyNamespaceRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyTableRequest;
@@ -148,6 +150,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.zookeeper.KeeperException;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.ServiceException;
 
@@ -282,7 +285,12 @@ public class HBaseAdmin implements Admin {
    */
   @Override
   public boolean tableExists(final TableName tableName) throws IOException {
-    return MetaTableAccessor.tableExists(connection, tableName);
+    return executeCallable(new ConnectionCallable<Boolean>(getConnection()) {
+      @Override
+      public Boolean call(int callTimeout) throws ServiceException, IOException {
+        return MetaTableAccessor.tableExists(connection, tableName);
+      }
+    });
   }
 
   public boolean tableExists(final byte[] tableName)
@@ -295,52 +303,38 @@ public class HBaseAdmin implements Admin {
     return tableExists(TableName.valueOf(tableName));
   }
 
-  /**
-   * List all the userspace tables.  In other words, scan the hbase:meta table.
-   *
-   * If we wanted this to be really fast, we could implement a special
-   * catalog table that just contains table names and their descriptors.
-   * Right now, it only exists as part of the hbase:meta table's region info.
-   *
-   * @return - returns an array of HTableDescriptors
-   * @throws IOException if a remote or network exception occurs
-   */
   @Override
   public HTableDescriptor[] listTables() throws IOException {
-   return executeCallable(new MasterCallable<HTableDescriptor[]>(getConnection()) {
+    return listTables((Pattern)null, false);
+  }
+
+  @Override
+  public HTableDescriptor[] listTables(Pattern pattern) throws IOException {
+    return listTables(pattern, false);
+  }
+
+  @Override
+  public HTableDescriptor[] listTables(String regex) throws IOException {
+    return listTables(Pattern.compile(regex), false);
+  }
+
+  @Override
+  public HTableDescriptor[] listTables(final Pattern pattern, final boolean includeSysTables)
+      throws IOException {
+    return executeCallable(new MasterCallable<HTableDescriptor[]>(getConnection()) {
       @Override
       public HTableDescriptor[] call(int callTimeout) throws ServiceException {
         GetTableDescriptorsRequest req =
-            RequestConverter.buildGetTableDescriptorsRequest((List<TableName>)null);
+            RequestConverter.buildGetTableDescriptorsRequest(pattern, includeSysTables);
         return ProtobufUtil.getHTableDescriptorArray(master.getTableDescriptors(null, req));
       }
     });
   }
 
-  /**
-   * List all the userspace tables matching the given pattern.
-   *
-   * @param pattern The compiled regular expression to match against
-   * @return - returns an array of HTableDescriptors
-   * @throws IOException if a remote or network exception occurs
-   * @see #listTables()
-   */
   @Override
-  public HTableDescriptor[] listTables(Pattern pattern) throws IOException {
-    return this.connection.listTables(pattern.toString());
-  }
-
-  /**
-   * List all the userspace tables matching the given regular expression.
-   *
-   * @param regex The regular expression to match against
-   * @return - returns an array of HTableDescriptors
-   * @throws IOException if a remote or network exception occurs
-   * @see #listTables(java.util.regex.Pattern)
-   */
-  @Override
-  public HTableDescriptor[] listTables(String regex) throws IOException {
-    return listTables(Pattern.compile(regex));
+  public HTableDescriptor[] listTables(String regex, boolean includeSysTables)
+      throws IOException {
+    return listTables(Pattern.compile(regex), includeSysTables);
   }
 
   /**
@@ -352,7 +346,7 @@ public class HBaseAdmin implements Admin {
   @Deprecated
   public String[] getTableNames() throws IOException {
     TableName[] tableNames = listTableNames();
-    String result[] = new String[tableNames.length];
+    String[] result = new String[tableNames.length];
     for (int i = 0; i < tableNames.length; i++) {
       result[i] = tableNames[i].getNameAsString();
     }
@@ -364,17 +358,16 @@ public class HBaseAdmin implements Admin {
    * @param pattern The regular expression to match against
    * @return String[] table names
    * @throws IOException if a remote or network exception occurs
-   * @deprecated Use {@link Admin#listTables(Pattern)} instead.
+   * @deprecated Use {@link Admin#listTableNames(Pattern)} instead.
    */
   @Deprecated
   public String[] getTableNames(Pattern pattern) throws IOException {
-    List<String> matched = new ArrayList<String>();
-    for (String name: getTableNames()) {
-      if (pattern.matcher(name).matches()) {
-        matched.add(name);
-      }
+    TableName[] tableNames = listTableNames(pattern);
+    String[] result = new String[tableNames.length];
+    for (int i = 0; i < tableNames.length; i++) {
+      result[i] = tableNames[i].getNameAsString();
     }
-    return matched.toArray(new String[matched.size()]);
+    return result;
   }
 
   /**
@@ -382,28 +375,46 @@ public class HBaseAdmin implements Admin {
    * @param regex The regular expression to match against
    * @return String[] table names
    * @throws IOException if a remote or network exception occurs
-   * @deprecated Use {@link Admin#listTables(Pattern)} instead.
+   * @deprecated Use {@link Admin#listTableNames(Pattern)} instead.
    */
   @Deprecated
   public String[] getTableNames(String regex) throws IOException {
     return getTableNames(Pattern.compile(regex));
   }
 
-  /**
-   * List all of the names of userspace tables.
-   * @return TableName[] table names
-   * @throws IOException if a remote or network exception occurs
-   */
   @Override
   public TableName[] listTableNames() throws IOException {
+    return listTableNames((Pattern)null, false);
+  }
+
+  @Override
+  public TableName[] listTableNames(Pattern pattern) throws IOException {
+    return listTableNames(pattern, false);
+  }
+
+  @Override
+  public TableName[] listTableNames(String regex) throws IOException {
+    return listTableNames(Pattern.compile(regex), false);
+  }
+
+  @Override
+  public TableName[] listTableNames(final Pattern pattern, final boolean includeSysTables)
+      throws IOException {
     return executeCallable(new MasterCallable<TableName[]>(getConnection()) {
       @Override
       public TableName[] call(int callTimeout) throws ServiceException {
-        return ProtobufUtil.getTableNameArray(master.getTableNames(null,
-          GetTableNamesRequest.newBuilder().build())
-        .getTableNamesList());
+        GetTableNamesRequest req =
+            RequestConverter.buildGetTableNamesRequest(pattern, includeSysTables);
+        return ProtobufUtil.getTableNameArray(master.getTableNames(null, req)
+            .getTableNamesList());
       }
     });
+  }
+
+  @Override
+  public TableName[] listTableNames(final String regex, final boolean includeSysTables)
+      throws IOException {
+    return listTableNames(Pattern.compile(regex), includeSysTables);
   }
 
   /**
@@ -417,9 +428,6 @@ public class HBaseAdmin implements Admin {
   public HTableDescriptor getTableDescriptor(final TableName tableName)
   throws TableNotFoundException, IOException {
     if (tableName == null) return null;
-    if (tableName.equals(TableName.META_TABLE_NAME)) {
-      return HTableDescriptor.META_TABLEDESC;
-    }
     HTableDescriptor htd = executeCallable(new MasterCallable<HTableDescriptor>(getConnection()) {
       @Override
       public HTableDescriptor call(int callTimeout) throws ServiceException {
@@ -543,15 +551,15 @@ public class HBaseAdmin implements Admin {
     }
     int numRegs = (splitKeys == null ? 1 : splitKeys.length + 1) * desc.getRegionReplication();
     int prevRegCount = 0;
-    boolean doneWithMetaScan = false;
+    boolean tableWasEnabled = false;
     for (int tries = 0; tries < this.numRetries * this.retryLongerMultiplier;
       ++tries) {
-      if (!doneWithMetaScan) {
-        // Wait for new table to come on-line
+      if (tableWasEnabled) {
+        // Wait all table regions comes online
         final AtomicInteger actualRegCount = new AtomicInteger(0);
-        MetaScannerVisitor visitor = new MetaScannerVisitorBase() {
+        MetaTableAccessor.Visitor visitor = new MetaTableAccessor.Visitor() {
           @Override
-          public boolean processRow(Result rowResult) throws IOException {
+          public boolean visit(Result rowResult) throws IOException {
             RegionLocations list = MetaTableAccessor.getRegionLocations(rowResult);
             if (list == null) {
               LOG.warn("No serialized HRegionInfo in " + rowResult);
@@ -577,7 +585,7 @@ public class HBaseAdmin implements Admin {
             return true;
           }
         };
-        MetaScanner.metaScan(conf, connection, visitor, desc.getTableName());
+        MetaTableAccessor.scanMetaForTableRegions(connection, visitor, desc.getTableName());
         if (actualRegCount.get() < numRegs) {
           if (tries == this.numRetries * this.retryLongerMultiplier - 1) {
             throw new RegionOfflineException("Only " + actualRegCount.get() +
@@ -595,17 +603,26 @@ public class HBaseAdmin implements Admin {
             tries = -1;
           }
         } else {
-          doneWithMetaScan = true;
-          tries = -1;
+          return;
         }
-      } else if (isTableEnabled(desc.getTableName())) {
-        return;
       } else {
-        try { // Sleep
-          Thread.sleep(getPauseTime(tries));
-        } catch (InterruptedException e) {
-          throw new InterruptedIOException("Interrupted when waiting" +
-            " for table to be enabled; meta scan was done");
+        try {
+          tableWasEnabled = isTableAvailable(desc.getTableName());
+        } catch (TableNotFoundException tnfe) {
+          LOG.debug(
+              "Table " + desc.getTableName() + " was not enabled, sleeping, still " + numRetries
+                  + " retries left");
+        }
+        if (tableWasEnabled) {
+          // no we will scan meta to ensure all regions are online
+          tries = -1;
+        } else {
+          try { // Sleep
+            Thread.sleep(getPauseTime(tries));
+          } catch (InterruptedException e) {
+            throw new InterruptedIOException("Interrupted when waiting" +
+                " for table to be enabled; meta scan was done");
+          }
         }
       }
     }
@@ -694,24 +711,11 @@ public class HBaseAdmin implements Admin {
     });
 
     int failures = 0;
-    // Wait until all regions deleted
     for (int tries = 0; tries < (this.numRetries * this.retryLongerMultiplier); tries++) {
       try {
-        // Find whether all regions are deleted.
-        List<RegionLocations> regionLations =
-            MetaScanner.listTableRegionLocations(conf, connection, tableName);
-
-        // let us wait until hbase:meta table is updated and
-        // HMaster removes the table from its HTableDescriptors
-        if (regionLations == null || regionLations.size() == 0) {
-          HTableDescriptor htd = getTableDescriptorByTableName(tableName);
-
-          if (htd == null) {
-            // table could not be found in master - we are done.
-            tableExists = false;
-            break;
-          }
-        }
+        tableExists = tableExists(tableName);
+        if (!tableExists)
+          break;
       } catch (IOException ex) {
         failures++;
         if(failures >= numRetries - 1) {           // no more tries left
@@ -1105,9 +1109,17 @@ public class HBaseAdmin implements Admin {
    * @throws IOException if a remote or network exception occurs
    */
   @Override
-  public boolean isTableEnabled(TableName tableName) throws IOException {
+  public boolean isTableEnabled(final TableName tableName) throws IOException {
     checkTableExistence(tableName);
-    return connection.isTableEnabled(tableName);
+    return executeCallable(new ConnectionCallable<Boolean>(getConnection()) {
+      @Override
+      public Boolean call(int callTimeout) throws ServiceException, IOException {
+        TableState tableState = MetaTableAccessor.getTableState(connection, tableName);
+        if (tableState == null)
+          throw new TableNotFoundException(tableName);
+        return tableState.inStates(TableState.State.ENABLED);
+      }
+    });
   }
 
   public boolean isTableEnabled(byte[] tableName) throws IOException {
@@ -2019,7 +2031,12 @@ public class HBaseAdmin implements Admin {
   public void mergeRegions(final byte[] encodedNameOfRegionA,
       final byte[] encodedNameOfRegionB, final boolean forcible)
       throws IOException {
-
+    Pair<HRegionInfo, ServerName> pair = getRegion(encodedNameOfRegionA);
+    if (pair != null && pair.getFirst().getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID)
+      throw new IllegalArgumentException("Can't invoke merge on non-default regions directly");
+    pair = getRegion(encodedNameOfRegionB);
+    if (pair != null && pair.getFirst().getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID)
+      throw new IllegalArgumentException("Can't invoke merge on non-default regions directly");
     executeCallable(new MasterCallable<Void>(getConnection()) {
       @Override
       public Void call(int callTimeout) throws ServiceException {
@@ -2098,7 +2115,8 @@ public class HBaseAdmin implements Admin {
         // check for parents
         if (r.isSplitParent()) continue;
         // if a split point given, only split that particular region
-        if (splitPoint != null && !r.containsRow(splitPoint)) continue;
+        if (r.getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID ||
+           (splitPoint != null && !r.containsRow(splitPoint))) continue;
         // call out to region server to do split now
         split(pair.getSecond(), pair.getFirst(), splitPoint);
       }
@@ -2118,6 +2136,11 @@ public class HBaseAdmin implements Admin {
     Pair<HRegionInfo, ServerName> regionServerPair = getRegion(regionName);
     if (regionServerPair == null) {
       throw new IllegalArgumentException("Invalid region: " + Bytes.toStringBinary(regionName));
+    }
+    if (regionServerPair.getFirst() != null &&
+        regionServerPair.getFirst().getReplicaId() != HRegionInfo.DEFAULT_REPLICA_ID) {
+      throw new IllegalArgumentException("Can't split replicas directly. "
+          + "Replicas are auto-split when their primary is split.");
     }
     if (regionServerPair.getSecond() == null) {
       throw new NoServerForRegionException(Bytes.toStringBinary(regionName));
@@ -2150,7 +2173,8 @@ public class HBaseAdmin implements Admin {
     }
   }
 
-  private void split(final ServerName sn, final HRegionInfo hri,
+  @VisibleForTesting
+  public void split(final ServerName sn, final HRegionInfo hri,
       byte[] splitPoint) throws IOException {
     if (hri.getStartKey() != null && splitPoint != null &&
          Bytes.compareTo(hri.getStartKey(), splitPoint) == 0) {
@@ -2217,22 +2241,33 @@ public class HBaseAdmin implements Admin {
       final AtomicReference<Pair<HRegionInfo, ServerName>> result =
         new AtomicReference<Pair<HRegionInfo, ServerName>>(null);
       final String encodedName = Bytes.toString(regionName);
-      MetaScannerVisitor visitor = new MetaScannerVisitorBase() {
+      MetaTableAccessor.Visitor visitor = new MetaTableAccessor.Visitor() {
         @Override
-        public boolean processRow(Result data) throws IOException {
+        public boolean visit(Result data) throws IOException {
           HRegionInfo info = HRegionInfo.getHRegionInfo(data);
           if (info == null) {
             LOG.warn("No serialized HRegionInfo in " + data);
             return true;
           }
-          if (!encodedName.equals(info.getEncodedName())) return true;
-          ServerName sn = HRegionInfo.getServerName(data);
+          RegionLocations rl = MetaTableAccessor.getRegionLocations(data);
+          boolean matched = false;
+          ServerName sn = null;
+          if (rl != null) {
+            for (HRegionLocation h : rl.getRegionLocations()) {
+              if (h != null && encodedName.equals(h.getRegionInfo().getEncodedName())) {
+                sn = h.getServerName();
+                info = h.getRegionInfo();
+                matched = true;
+              }
+            }
+          }
+          if (!matched) return true;
           result.set(new Pair<HRegionInfo, ServerName>(info, sn));
           return false; // found the region, stop
         }
       };
 
-      MetaScanner.metaScan(conf, connection, visitor, null);
+      MetaTableAccessor.fullScanRegions(connection, visitor);
       pair = result.get();
     }
     return pair;
@@ -2271,10 +2306,15 @@ public class HBaseAdmin implements Admin {
    */
   private TableName checkTableExists(final TableName tableName)
       throws IOException {
-    if (!MetaTableAccessor.tableExists(connection, tableName)) {
-      throw new TableNotFoundException(tableName);
-    }
-    return tableName;
+    return executeCallable(new ConnectionCallable<TableName>(getConnection()) {
+      @Override
+      public TableName call(int callTimeout) throws ServiceException, IOException {
+        if (!MetaTableAccessor.tableExists(connection, tableName)) {
+          throw new TableNotFoundException(tableName);
+        }
+        return tableName;
+      }
+    });
   }
 
   /**
@@ -2647,7 +2687,7 @@ public class HBaseAdmin implements Admin {
   }
 
   /**
-   * Roll the log writer. I.e. when using a file system based write ahead log, 
+   * Roll the log writer. I.e. when using a file system based write ahead log,
    * start writing log messages to a new file.
    *
    * Note that when talking to a version 1.0+ HBase deployment, the rolling is asynchronous.
@@ -2877,8 +2917,8 @@ public class HBaseAdmin implements Admin {
                         final byte[] tableName) throws IOException,
     * <p>
     * Snapshots are considered unique based on <b>the name of the snapshot</b>. Attempts to take a
-    * snapshot with the same name (even a different type or with different parameters) will fail with
-    * a {@link SnapshotCreationException} indicating the duplicate naming.
+    * snapshot with the same name (even a different type or with different parameters) will fail
+    * with a {@link SnapshotCreationException} indicating the duplicate naming.
     * <p>
     * Snapshot names follow the same naming constraints as tables in HBase.
     * @param snapshotName name of the snapshot to be created
@@ -3448,7 +3488,8 @@ public class HBaseAdmin implements Admin {
         // sleep a backoff <= pauseTime amount
         long sleep = getPauseTime(tries++);
         sleep = sleep > maxPauseTime ? maxPauseTime : sleep;
-        LOG.debug(tries + ") Sleeping: " + sleep + " ms while we wait for snapshot restore to complete.");
+        LOG.debug(tries + ") Sleeping: " + sleep
+            + " ms while we wait for snapshot restore to complete.");
         Thread.sleep(sleep);
       } catch (InterruptedException e) {
         throw (InterruptedIOException)new InterruptedIOException("Interrupted").initCause(e);
@@ -3641,7 +3682,8 @@ public class HBaseAdmin implements Admin {
     return QuotaRetriever.open(conf, filter);
   }
 
-  private <V> V executeCallable(MasterCallable<V> callable) throws IOException {
+  private <C extends RetryingCallable<V> & Closeable, V> V executeCallable(C callable)
+      throws IOException {
     RpcRetryingCaller<V> caller = rpcCallerFactory.newCaller();
     try {
       return caller.callWithRetries(callable, operationTimeout);
@@ -3747,5 +3789,34 @@ public class HBaseAdmin implements Admin {
     } catch (KeeperException e) {
       throw new IOException("Failed to get master info port from MasterAddressTracker", e);
     }
+  }
+
+  @Override
+  public long getLastMajorCompactionTimestamp(final TableName tableName) throws IOException {
+    return executeCallable(new MasterCallable<Long>(getConnection()) {
+      @Override
+      public Long call(int callTimeout) throws ServiceException {
+        MajorCompactionTimestampRequest req =
+            MajorCompactionTimestampRequest.newBuilder()
+                .setTableName(ProtobufUtil.toProtoTableName(tableName)).build();
+        return master.getLastMajorCompactionTimestamp(null, req).getCompactionTimestamp();
+      }
+    });
+  }
+
+  @Override
+  public long getLastMajorCompactionTimestampForRegion(final byte[] regionName) throws IOException {
+    return executeCallable(new MasterCallable<Long>(getConnection()) {
+      @Override
+      public Long call(int callTimeout) throws ServiceException {
+        MajorCompactionTimestampForRegionRequest req =
+            MajorCompactionTimestampForRegionRequest
+                .newBuilder()
+                .setRegion(
+                  RequestConverter
+                      .buildRegionSpecifier(RegionSpecifierType.REGION_NAME, regionName)).build();
+        return master.getLastMajorCompactionTimestampForRegion(null, req).getCompactionTimestamp();
+      }
+    });
   }
 }

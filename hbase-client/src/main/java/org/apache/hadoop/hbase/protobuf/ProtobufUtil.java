@@ -37,7 +37,6 @@ import java.util.Map.Entry;
 import java.util.NavigableSet;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
@@ -53,6 +52,7 @@ import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Append;
 import org.apache.hadoop.hbase.client.Consistency;
 import org.apache.hadoop.hbase.client.Delete;
@@ -103,6 +103,7 @@ import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.Col
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.DeleteType;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto.MutationType;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.ScanRequest;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
 import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionLoad;
 import org.apache.hadoop.hbase.protobuf.generated.ComparatorProtos;
 import org.apache.hadoop.hbase.protobuf.generated.FilterProtos;
@@ -124,9 +125,13 @@ import org.apache.hadoop.hbase.protobuf.generated.WALProtos.FlushDescriptor;
 import org.apache.hadoop.hbase.protobuf.generated.WALProtos.FlushDescriptor.FlushAction;
 import org.apache.hadoop.hbase.protobuf.generated.WALProtos.RegionEventDescriptor;
 import org.apache.hadoop.hbase.protobuf.generated.WALProtos.RegionEventDescriptor.EventType;
+import org.apache.hadoop.hbase.protobuf.generated.WALProtos.BulkLoadDescriptor;
+import org.apache.hadoop.hbase.protobuf.generated.WALProtos.StoreDescriptor;
 import org.apache.hadoop.hbase.quotas.QuotaScope;
 import org.apache.hadoop.hbase.quotas.QuotaType;
 import org.apache.hadoop.hbase.quotas.ThrottleType;
+import org.apache.hadoop.hbase.replication.ReplicationLoadSink;
+import org.apache.hadoop.hbase.replication.ReplicationLoadSource;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.access.TablePermission;
 import org.apache.hadoop.hbase.security.access.UserPermission;
@@ -171,7 +176,6 @@ public final class ProtobufUtil {
    */
   private final static Map<String, Class<?>>
     PRIMITIVES = new HashMap<String, Class<?>>();
-
 
   /**
    * Many results are simple: no cell, exists true or false. To save on object creations,
@@ -241,27 +245,20 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Magic we put ahead of a serialized protobuf message.
-   * For example, all znode content is protobuf messages with the below magic
-   * for preamble.
-   */
-  public static final byte [] PB_MAGIC = new byte [] {'P', 'B', 'U', 'F'};
-  private static final String PB_MAGIC_STR = Bytes.toString(PB_MAGIC);
-
-  /**
-   * Prepend the passed bytes with four bytes of magic, {@link #PB_MAGIC}, to flag what
-   * follows as a protobuf in hbase.  Prepend these bytes to all content written to znodes, etc.
+   * Prepend the passed bytes with four bytes of magic, {@link ProtobufMagic#PB_MAGIC},
+   * to flag what follows as a protobuf in hbase.  Prepend these bytes to all content written to
+   * znodes, etc.
    * @param bytes Bytes to decorate
    * @return The passed <code>bytes</codes> with magic prepended (Creates a new
-   * byte array that is <code>bytes.length</code> plus {@link #PB_MAGIC}.length.
+   * byte array that is <code>bytes.length</code> plus {@link ProtobufMagic#PB_MAGIC}.length.
    */
   public static byte [] prependPBMagic(final byte [] bytes) {
-    return Bytes.add(PB_MAGIC, bytes);
+    return Bytes.add(ProtobufMagic.PB_MAGIC, bytes);
   }
 
   /**
    * @param bytes Bytes to check.
-   * @return True if passed <code>bytes</code> has {@link #PB_MAGIC} for a prefix.
+   * @return True if passed <code>bytes</code> has {@link ProtobufMagic#PB_MAGIC} for a prefix.
    */
   public static boolean isPBMagicPrefix(final byte [] bytes) {
     if (bytes == null) return false;
@@ -270,11 +267,12 @@ public final class ProtobufUtil {
 
   /**
    * @param bytes Bytes to check.
-   * @return True if passed <code>bytes</code> has {@link #PB_MAGIC} for a prefix.
+   * @return True if passed <code>bytes</code> has {@link ProtobufMagic#PB_MAGIC} for a prefix.
    */
   public static boolean isPBMagicPrefix(final byte [] bytes, int offset, int len) {
-    if (bytes == null || len < PB_MAGIC.length) return false;
-    return Bytes.compareTo(PB_MAGIC, 0, PB_MAGIC.length, bytes, offset, PB_MAGIC.length) == 0;
+    if (bytes == null || len < ProtobufMagic.PB_MAGIC.length) return false;
+    return Bytes.compareTo(ProtobufMagic.PB_MAGIC, 0, ProtobufMagic.PB_MAGIC.length,
+      bytes, offset, ProtobufMagic.PB_MAGIC.length) == 0;
   }
 
   /**
@@ -283,15 +281,16 @@ public final class ProtobufUtil {
    */
   public static void expectPBMagicPrefix(final byte [] bytes) throws DeserializationException {
     if (!isPBMagicPrefix(bytes)) {
-      throw new DeserializationException("Missing pb magic " + PB_MAGIC_STR + " prefix");
+      throw new DeserializationException("Missing pb magic " +
+          Bytes.toString(ProtobufMagic.PB_MAGIC) + " prefix");
     }
   }
 
   /**
-   * @return Length of {@link #PB_MAGIC}
+   * @return Length of {@link ProtobufMagic#PB_MAGIC}
    */
   public static int lengthOfPBMagic() {
-    return PB_MAGIC.length;
+    return ProtobufMagic.PB_MAGIC.length;
   }
 
   /**
@@ -1285,6 +1284,7 @@ public final class ProtobufUtil {
     }
 
     builder.setStale(result.isStale());
+    builder.setPartial(result.isPartial());
 
     return builder.build();
   }
@@ -1343,7 +1343,7 @@ public final class ProtobufUtil {
     for (CellProtos.Cell c : values) {
       cells.add(toCell(c));
     }
-    return Result.create(cells, null, proto.getStale());
+    return Result.create(cells, null, proto.getStale(), proto.getPartial());
   }
 
   /**
@@ -1883,7 +1883,7 @@ public final class ProtobufUtil {
   public static byte [] toDelimitedByteArray(final Message m) throws IOException {
     // Allocate arbitrary big size so we avoid resizing.
     ByteArrayOutputStream baos = new ByteArrayOutputStream(4096);
-    baos.write(PB_MAGIC);
+    baos.write(ProtobufMagic.PB_MAGIC);
     m.writeDelimitedTo(baos);
     return baos.toByteArray();
   }
@@ -2584,6 +2584,7 @@ public final class ProtobufUtil {
     FlushDescriptor.Builder desc = FlushDescriptor.newBuilder()
         .setAction(action)
         .setEncodedRegionName(ByteStringer.wrap(hri.getEncodedNameAsBytes()))
+        .setRegionName(ByteStringer.wrap(hri.getRegionName()))
         .setFlushSequenceNumber(flushSeqId)
         .setTableName(ByteStringer.wrap(hri.getTable().getName()));
 
@@ -2609,12 +2610,12 @@ public final class ProtobufUtil {
         .setEventType(eventType)
         .setTableName(ByteStringer.wrap(hri.getTable().getName()))
         .setEncodedRegionName(ByteStringer.wrap(hri.getEncodedNameAsBytes()))
+        .setRegionName(ByteStringer.wrap(hri.getRegionName()))
         .setLogSequenceNumber(seqId)
         .setServer(toServerName(server));
 
     for (Map.Entry<byte[], List<Path>> entry : storeFiles.entrySet()) {
-      RegionEventDescriptor.StoreDescriptor.Builder builder
-        = RegionEventDescriptor.StoreDescriptor.newBuilder()
+      StoreDescriptor.Builder builder = StoreDescriptor.newBuilder()
           .setFamilyName(ByteStringer.wrap(entry.getKey()))
           .setStoreHomeDir(Bytes.toString(entry.getKey()));
       for (Path path : entry.getValue()) {
@@ -2968,4 +2969,55 @@ public final class ProtobufUtil {
             .setScope(toProtoQuotaScope(scope))
             .build();
   }
+
+  /**
+   * Generates a marker for the WAL so that we propagate the notion of a bulk region load
+   * throughout the WAL.
+   *
+   * @param tableName         The tableName into which the bulk load is being imported into.
+   * @param encodedRegionName Encoded region name of the region which is being bulk loaded.
+   * @param storeFiles        A set of store files of a column family are bulk loaded.
+   * @param bulkloadSeqId     sequence ID (by a force flush) used to create bulk load hfile
+   *                          name
+   * @return The WAL log marker for bulk loads.
+   */
+  public static WALProtos.BulkLoadDescriptor toBulkLoadDescriptor(TableName tableName,
+      ByteString encodedRegionName, Map<byte[], List<Path>> storeFiles, long bulkloadSeqId) {
+    BulkLoadDescriptor.Builder desc = BulkLoadDescriptor.newBuilder()
+        .setTableName(ProtobufUtil.toProtoTableName(tableName))
+        .setEncodedRegionName(encodedRegionName).setBulkloadSeqNum(bulkloadSeqId);
+
+    for (Map.Entry<byte[], List<Path>> entry : storeFiles.entrySet()) {
+      WALProtos.StoreDescriptor.Builder builder = StoreDescriptor.newBuilder()
+          .setFamilyName(ByteStringer.wrap(entry.getKey()))
+          .setStoreHomeDir(Bytes.toString(entry.getKey())); // relative to region
+      for (Path path : entry.getValue()) {
+        builder.addStoreFile(path.getName());
+      }
+      desc.addStores(builder);
+    }
+
+    return desc.build();
+  }
+
+  public static ReplicationLoadSink toReplicationLoadSink(
+      ClusterStatusProtos.ReplicationLoadSink cls) {
+    return new ReplicationLoadSink(cls.getAgeOfLastAppliedOp(), cls.getTimeStampsOfLastAppliedOp());
+  }
+
+  public static ReplicationLoadSource toReplicationLoadSource(
+      ClusterStatusProtos.ReplicationLoadSource cls) {
+    return new ReplicationLoadSource(cls.getPeerID(), cls.getAgeOfLastShippedOp(),
+        cls.getSizeOfLogQueue(), cls.getTimeStampOfLastShippedOp(), cls.getReplicationLag());
+  }
+
+  public static List<ReplicationLoadSource> toReplicationLoadSourceList(
+      List<ClusterStatusProtos.ReplicationLoadSource> clsList) {
+    ArrayList<ReplicationLoadSource> rlsList = new ArrayList<ReplicationLoadSource>();
+    for (ClusterStatusProtos.ReplicationLoadSource cls : clsList) {
+      rlsList.add(toReplicationLoadSource(cls));
+    }
+    return rlsList;
+  }
+
 }

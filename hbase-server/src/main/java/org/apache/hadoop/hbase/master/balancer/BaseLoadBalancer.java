@@ -45,7 +45,7 @@ import org.apache.hadoop.hbase.RegionLoad;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
-import org.apache.hadoop.hbase.master.AssignmentManager;
+import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.RackManager;
@@ -61,8 +61,9 @@ import com.google.common.collect.Sets;
 
 /**
  * The base class for load balancers. It provides the the functions used to by
- * {@link AssignmentManager} to assign regions in the edge cases. It doesn't
- * provide an implementation of the actual balancing algorithm.
+ * {@link org.apache.hadoop.hbase.master.AssignmentManager} to assign regions
+ * in the edge cases. It doesn't provide an implementation of the
+ * actual balancing algorithm.
  *
  */
 public abstract class BaseLoadBalancer implements LoadBalancer {
@@ -137,8 +138,6 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     int numRegions;
 
     int numMovedRegions = 0; //num moved regions from the initial configuration
-    // num of moved regions away from master that should be on the master
-    int numMovedMetaRegions = 0;       //num of moved regions that are META
     Map<ServerName, List<HRegionInfo>> clusterState;
 
     protected final RackManager rackManager;
@@ -856,10 +855,11 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
 
   /**
    * Check if a region belongs to some small system table.
-   * If so, it may be expected to be put on the master regionserver.
+   * If so, the primary replica may be expected to be put on the master regionserver.
    */
   public boolean shouldBeOnMaster(HRegionInfo region) {
-    return tablesOnMaster.contains(region.getTable().getNameAsString());
+    return tablesOnMaster.contains(region.getTable().getNameAsString())
+        && region.getReplicaId() == HRegionInfo.DEFAULT_REPLICA_ID;
   }
 
   /**
@@ -1387,5 +1387,9 @@ public abstract class BaseLoadBalancer implements LoadBalancer {
     } else {
       return new HashMap<ServerName, List<HRegionInfo>>();
     }
+  }
+
+  @Override
+  public void onConfigurationChange(Configuration conf) {
   }
 }

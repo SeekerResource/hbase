@@ -31,6 +31,8 @@ import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
@@ -104,6 +106,7 @@ public class TestDefaultScanLabelGeneratorStack {
 
     SUPERUSER.runAs(new PrivilegedExceptionAction<Void>() {
       public Void run() throws Exception {
+        Connection connection = ConnectionFactory.createConnection(conf);
         Table table = TEST_UTIL.createTable(tableName, CF);
         try {
           Put put = new Put(ROW_1);
@@ -120,13 +123,55 @@ public class TestDefaultScanLabelGeneratorStack {
           return null;
         } finally {
           table.close();
+          connection.close();
+        }
+      }
+    });
+
+    // Test that super user can see all the cells.
+    SUPERUSER.runAs(new PrivilegedExceptionAction<Void>() {
+      public Void run() throws Exception {
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table table = connection.getTable(tableName);
+        try {
+          Scan s = new Scan();
+          ResultScanner scanner = table.getScanner(s);
+          Result[] next = scanner.next(1);
+
+          // Test that super user can see all the cells.
+          assertTrue(next.length == 1);
+          CellScanner cellScanner = next[0].cellScanner();
+          cellScanner.advance();
+          Cell current = cellScanner.current();
+          assertTrue(Bytes.equals(current.getRowArray(), current.getRowOffset(),
+              current.getRowLength(), ROW_1, 0, ROW_1.length));
+          assertTrue(Bytes.equals(current.getQualifier(), Q1));
+          assertTrue(Bytes.equals(current.getValue(), value1));
+          cellScanner.advance();
+          current = cellScanner.current();
+          assertTrue(Bytes.equals(current.getRowArray(), current.getRowOffset(),
+              current.getRowLength(), ROW_1, 0, ROW_1.length));
+          assertTrue(Bytes.equals(current.getQualifier(), Q2));
+          assertTrue(Bytes.equals(current.getValue(), value2));
+          cellScanner.advance();
+          current = cellScanner.current();
+          assertTrue(Bytes.equals(current.getRowArray(), current.getRowOffset(),
+              current.getRowLength(), ROW_1, 0, ROW_1.length));
+          assertTrue(Bytes.equals(current.getQualifier(), Q3));
+          assertTrue(Bytes.equals(current.getValue(), value3));
+
+          return null;
+        } finally {
+          table.close();
+          connection.close();
         }
       }
     });
 
     TESTUSER.runAs(new PrivilegedExceptionAction<Void>() {
       public Void run() throws Exception {
-        Table table = new HTable(conf, tableName);
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table table = connection.getTable(tableName);
         try {
           // Test scan with no auth attribute
           Scan s = new Scan();
@@ -193,10 +238,10 @@ public class TestDefaultScanLabelGeneratorStack {
 
           assertFalse(cellScanner2.advance());
 
-
           return null;
         } finally {
           table.close();
+          connection.close();
         }
       }
     });

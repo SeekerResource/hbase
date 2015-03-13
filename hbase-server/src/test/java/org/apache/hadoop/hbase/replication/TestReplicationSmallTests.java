@@ -23,6 +23,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 
@@ -30,15 +31,18 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.ClusterStatus;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
@@ -69,7 +73,6 @@ public class TestReplicationSmallTests extends TestReplicationBase {
    */
   @Before
   public void setUp() throws Exception {
-    htable1.setAutoFlushTo(true);
     // Starting and stopping replication can make us miss new logs,
     // rolling like this makes sure the most recent one gets added to the queue
     for ( JVMClusterUtil.RegionServerThread r :
@@ -115,7 +118,7 @@ public class TestReplicationSmallTests extends TestReplicationBase {
     final byte[] v1 = Bytes.toBytes("v1");
     final byte[] v2 = Bytes.toBytes("v2");
     final byte[] v3 = Bytes.toBytes("v3");
-    htable1 = new HTable(conf1, tableName);
+    htable1 = utility1.getConnection().getTable(tableName);
 
     long t = EnvironmentEdgeManager.currentTime();
     // create three versions for "row"
@@ -202,7 +205,7 @@ public class TestReplicationSmallTests extends TestReplicationBase {
     Put put = new Put(row);
     put.add(famName, row, row);
 
-    htable1 = new HTable(conf1, tableName);
+    htable1 = utility1.getConnection().getTable(tableName);
     htable1.put(put);
 
     Get get = new Get(row);
@@ -245,15 +248,14 @@ public class TestReplicationSmallTests extends TestReplicationBase {
   @Test(timeout=300000)
   public void testSmallBatch() throws Exception {
     LOG.info("testSmallBatch");
-    Put put;
     // normal Batch tests
-    htable1.setAutoFlushTo(false);
+    List<Put> puts = new ArrayList<>();
     for (int i = 0; i < NB_ROWS_IN_BATCH; i++) {
-      put = new Put(Bytes.toBytes(i));
+      Put put = new Put(Bytes.toBytes(i));
       put.add(famName, row, row);
-      htable1.put(put);
+      puts.add(put);
     }
-    htable1.flushCommits();
+    htable1.put(puts);
 
     Scan scan = new Scan();
 
@@ -386,14 +388,16 @@ public class TestReplicationSmallTests extends TestReplicationBase {
   @Test(timeout=300000)
   public void testLoading() throws Exception {
     LOG.info("Writing out rows to table1 in testLoading");
-    htable1.setWriteBufferSize(1024);
-    ((HTable)htable1).setAutoFlushTo(false);
+    List<Put> puts = new ArrayList<Put>();
     for (int i = 0; i < NB_ROWS_IN_BIG_BATCH; i++) {
       Put put = new Put(Bytes.toBytes(i));
       put.add(famName, row, row);
-      htable1.put(put);
+      puts.add(put);
     }
-    htable1.flushCommits();
+    htable1.setWriteBufferSize(1024);
+    // The puts will be iterated through and flushed only when the buffer
+    // size is reached.
+    htable1.put(puts);
 
     Scan scan = new Scan();
 
@@ -511,13 +515,13 @@ public class TestReplicationSmallTests extends TestReplicationBase {
    */
   @Test(timeout = 300000)
   public void testVerifyListReplicatedTable() throws Exception {
-	LOG.info("testVerifyListReplicatedTable");
+    LOG.info("testVerifyListReplicatedTable");
 
     final String tName = "VerifyListReplicated_";
     final String colFam = "cf1";
     final int numOfTables = 3;
 
-    HBaseAdmin hadmin = new HBaseAdmin(conf1);
+    HBaseAdmin hadmin = utility1.getHBaseAdmin();
 
     // Create Tables
     for (int i = 0; i < numOfTables; i++) {
@@ -556,4 +560,45 @@ public class TestReplicationSmallTests extends TestReplicationBase {
     hadmin.close();
   }
 
+  /**
+   * Test for HBASE-9531
+   * put a few rows into htable1, which should be replicated to htable2
+   * create a ClusterStatus instance 'status' from HBaseAdmin
+   * test : status.getLoad(server).getReplicationLoadSourceList()
+   * test : status.getLoad(server).getReplicationLoadSink()
+   * * @throws Exception
+   */
+  @Test(timeout = 300000)
+  public void testReplicationStatus() throws Exception {
+    LOG.info("testReplicationStatus");
+
+    try (Admin admin = utility1.getConnection().getAdmin()) {
+
+      final byte[] qualName = Bytes.toBytes("q");
+      Put p;
+
+      for (int i = 0; i < NB_ROWS_IN_BATCH; i++) {
+        p = new Put(Bytes.toBytes("row" + i));
+        p.add(famName, qualName, Bytes.toBytes("val" + i));
+        htable1.put(p);
+      }
+
+      ClusterStatus status = admin.getClusterStatus();
+
+      for (ServerName server : status.getServers()) {
+        ServerLoad sl = status.getLoad(server);
+        List<ReplicationLoadSource> rLoadSourceList = sl.getReplicationLoadSourceList();
+        ReplicationLoadSink rLoadSink = sl.getReplicationLoadSink();
+
+        // check SourceList has at least one entry
+        assertTrue("failed to get ReplicationLoadSourceList", (rLoadSourceList.size() > 0));
+
+        // check Sink exist only as it is difficult to verify the value on the fly
+        assertTrue("failed to get ReplicationLoadSink.AgeOfLastShippedOp ",
+          (rLoadSink.getAgeOfLastAppliedOp() >= 0));
+        assertTrue("failed to get ReplicationLoadSink.TimeStampsOfLastAppliedOp ",
+          (rLoadSink.getTimeStampsOfLastAppliedOp() >= 0));
+      }
+    }
+  }
 }

@@ -26,11 +26,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag;
@@ -39,13 +39,15 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos;
-import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.RegionStoreSequenceIds;
 import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
@@ -61,15 +63,18 @@ import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs.Ids;
+import org.apache.zookeeper.ZooDefs.Perms;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.client.ZooKeeperSaslClient;
 import org.apache.zookeeper.data.ACL;
+import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.proto.CreateRequest;
 import org.apache.zookeeper.proto.DeleteRequest;
 import org.apache.zookeeper.proto.SetDataRequest;
 import org.apache.zookeeper.server.ZooKeeperSaslServer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.InvalidProtocolBufferException;
 
 /**
@@ -89,6 +94,25 @@ public class ZKUtil {
   public static final char ZNODE_PATH_SEPARATOR = '/';
   private static int zkDumpConnectionTimeOut;
 
+  // The Quorum for the ZK cluster can have one the following format (see examples below):
+  // (1). s1,s2,s3 (no client port in the list, the client port could be obtained from clientPort)
+  // (2). s1:p1,s2:p2,s3:p3 (with client port, which could be same or different for each server,
+  //      in this case, the clientPort would be ignored)
+  // (3). s1:p1,s2,s3:p3 (mix of (1) and (2) - if port is not specified in a server, it would use
+  //      the clientPort; otherwise, it would use the specified port)
+  @VisibleForTesting
+  public static class ZKClusterKey {
+    public String quorumString;
+    public int clientPort;
+    public String znodeParent;
+
+    ZKClusterKey(String quorumString, int clientPort, String znodeParent) {
+      this.quorumString = quorumString;
+      this.clientPort = clientPort;
+      this.znodeParent = znodeParent;
+    }
+  }
+
   /**
    * Creates a new connection to ZooKeeper, pulling settings and ensemble config
    * from the specified configuration object using methods from {@link ZKConfig}.
@@ -102,8 +126,7 @@ public class ZKUtil {
    */
   public static RecoverableZooKeeper connect(Configuration conf, Watcher watcher)
   throws IOException {
-    Properties properties = ZKConfig.makeZKProps(conf);
-    String ensemble = ZKConfig.getZKQuorumServersString(properties);
+    String ensemble = ZKConfig.getZKQuorumServersString(conf);
     return connect(conf, ensemble, watcher);
   }
 
@@ -377,10 +400,10 @@ public class ZKUtil {
    */
   public static void applyClusterKeyToConf(Configuration conf, String key)
       throws IOException{
-    String[] parts = transformClusterKey(key);
-    conf.set(HConstants.ZOOKEEPER_QUORUM, parts[0]);
-    conf.set(HConstants.ZOOKEEPER_CLIENT_PORT, parts[1]);
-    conf.set(HConstants.ZOOKEEPER_ZNODE_PARENT, parts[2]);
+    ZKClusterKey zkClusterKey = transformClusterKey(key);
+    conf.set(HConstants.ZOOKEEPER_QUORUM, zkClusterKey.quorumString);
+    conf.setInt(HConstants.ZOOKEEPER_CLIENT_PORT, zkClusterKey.clientPort);
+    conf.set(HConstants.ZOOKEEPER_ZNODE_PARENT, zkClusterKey.znodeParent);
   }
 
   /**
@@ -391,14 +414,53 @@ public class ZKUtil {
    * @return the three configuration in the described order
    * @throws IOException
    */
-  public static String[] transformClusterKey(String key) throws IOException {
+  public static ZKClusterKey transformClusterKey(String key) throws IOException {
     String[] parts = key.split(":");
-    if (parts.length != 3) {
-      throw new IOException("Cluster key passed " + key + " is invalid, the format should be:" +
-          HConstants.ZOOKEEPER_QUORUM + ":hbase.zookeeper.client.port:"
-          + HConstants.ZOOKEEPER_ZNODE_PARENT);
+
+    if (parts.length == 3) {
+      return new ZKClusterKey(parts [0], Integer.parseInt(parts [1]), parts [2]);
     }
-    return parts;
+
+    if (parts.length > 3) {
+      // The quorum could contain client port in server:clientport format, try to transform more.
+      String zNodeParent = parts [parts.length - 1];
+      String clientPort = parts [parts.length - 2];
+
+      // The first part length is the total length minus the lengths of other parts and minus 2 ":"
+      int endQuorumIndex = key.length() - zNodeParent.length() - clientPort.length() - 2;
+      String quorumStringInput = key.substring(0, endQuorumIndex);
+      String[] serverHosts = quorumStringInput.split(",");
+
+      // The common case is that every server has its own client port specified - this means
+      // that (total parts - the ZNodeParent part - the ClientPort part) is equal to
+      // (the number of "," + 1) - "+ 1" because the last server has no ",".
+      if ((parts.length - 2) == (serverHosts.length + 1)) {
+        return new ZKClusterKey(quorumStringInput, Integer.parseInt(clientPort), zNodeParent);
+      }
+
+      // For the uncommon case that some servers has no port specified, we need to build the
+      // server:clientport list using default client port for servers without specified port.
+      return new ZKClusterKey(
+        ZKConfig.buildQuorumServerString(serverHosts, clientPort),
+        Integer.parseInt(clientPort),
+        zNodeParent);
+    }
+
+    throw new IOException("Cluster key passed " + key + " is invalid, the format should be:" +
+          HConstants.ZOOKEEPER_QUORUM + ":" + HConstants.ZOOKEEPER_CLIENT_PORT + ":"
+          + HConstants.ZOOKEEPER_ZNODE_PARENT);
+  }
+
+  /**
+   * Standardize the ZK quorum string: make it a "server:clientport" list, separated by ','
+   * @param quorumStringInput a string contains a list of servers for ZK quorum
+   * @param clientPort the default client port
+   * @return the string for a list of "server:port" separated by ","
+   */
+  @VisibleForTesting
+  public static String standardizeQuorumServerString(String quorumStringInput, String clientPort) {
+    String[] serverHosts = quorumStringInput.split(",");
+    return ZKConfig.buildQuorumServerString(serverHosts, clientPort);
   }
 
   //
@@ -935,7 +997,8 @@ public class ZKUtil {
     // Detection for embedded HBase client with jaas configuration
     // defined for third party programs.
     try {
-      javax.security.auth.login.Configuration testConfig = javax.security.auth.login.Configuration.getConfiguration();
+      javax.security.auth.login.Configuration testConfig =
+          javax.security.auth.login.Configuration.getConfiguration();
       if(testConfig.getAppConfigurationEntry("Client") == null) {
         return false;
       }
@@ -949,20 +1012,32 @@ public class ZKUtil {
          conf.get("hbase.zookeeper.client.keytab.file") != null);
   }
 
-  private static List<ACL> createACL(ZooKeeperWatcher zkw, String node) {
+  private static ArrayList<ACL> createACL(ZooKeeperWatcher zkw, String node) {
+    if (!node.startsWith(zkw.baseZNode)) {
+      return Ids.OPEN_ACL_UNSAFE;
+    }
     if (isSecureZooKeeper(zkw.getConfiguration())) {
+      String superUser = zkw.getConfiguration().get("hbase.superuser");
+      ArrayList<ACL> acls = new ArrayList<ACL>();
+      // add permission to hbase supper user
+      if (superUser != null) {
+        acls.add(new ACL(Perms.ALL, new Id("auth", superUser)));
+      }
       // Certain znodes are accessed directly by the client,
       // so they must be readable by non-authenticated clients
       if ((node.equals(zkw.baseZNode) == true) ||
-          (node.equals(zkw.metaServerZNode) == true) ||
+          (zkw.isAnyMetaReplicaZnode(node)) ||
           (node.equals(zkw.getMasterAddressZNode()) == true) ||
           (node.equals(zkw.clusterIdZNode) == true) ||
           (node.equals(zkw.rsZNode) == true) ||
           (node.equals(zkw.backupMasterAddressesZNode) == true) ||
           (node.startsWith(zkw.tableZNode) == true)) {
-        return ZooKeeperWatcher.CREATOR_ALL_AND_WORLD_READABLE;
+        acls.addAll(Ids.CREATOR_ALL_ACL);
+        acls.addAll(Ids.READ_ACL_UNSAFE);
+      } else {
+        acls.addAll(Ids.CREATOR_ALL_ACL);
       }
-      return Ids.CREATOR_ALL_ACL;
+      return acls;
     } else {
       return Ids.OPEN_ACL_UNSAFE;
     }
@@ -1191,7 +1266,6 @@ public class ZKUtil {
       } catch (InterruptedException ie) {
         zkw.interruptedException(ie);
       }
-
     } catch(InterruptedException ie) {
       zkw.interruptedException(ie);
     }
@@ -1318,8 +1392,8 @@ public class ZKUtil {
           deleteNodeRecursively(zkw, joinZNode(node, child));
         }
       }
-      //Zookeeper Watches are one time triggers; When children of parent nodes are deleted recursively. 
-      //Must set another watch, get notified of delete node   
+      //Zookeeper Watches are one time triggers; When children of parent nodes are deleted
+      //recursively, must set another watch, get notified of delete node
       if (zkw.getRecoverableZooKeeper().exists(node, zkw) != null){
         zkw.getRecoverableZooKeeper().delete(node, -1);
       }
@@ -1333,14 +1407,106 @@ public class ZKUtil {
    *
    * Sets no watches.  Throws all exceptions besides dealing with deletion of
    * children.
+   *
+   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update functionality.
+   * Otherwise, run the list of operations sequentially.
+   *
+   * @throws KeeperException
    */
   public static void deleteChildrenRecursively(ZooKeeperWatcher zkw, String node)
-  throws KeeperException {
-    List<String> children = ZKUtil.listChildrenNoWatch(zkw, node);
-    if (children == null || children.isEmpty()) return;
-    for(String child : children) {
-      deleteNodeRecursively(zkw, joinZNode(node, child));
+      throws KeeperException {
+    deleteChildrenRecursivelyMultiOrSequential(zkw, true, node);
+  }
+
+  /**
+   * Delete all the children of the specified node but not the node itself. This
+   * will first traverse the znode tree for listing the children and then delete
+   * these znodes using multi-update api or sequential based on the specified
+   * configurations.
+   * <p>
+   * Sets no watches. Throws all exceptions besides dealing with deletion of
+   * children.
+   * <p>
+   * If hbase.zookeeper.useMulti is true, use ZooKeeper's multi-update
+   * functionality. Otherwise, run the list of operations sequentially.
+   * <p>
+   * If all of the following are true:
+   * <ul>
+   * <li>runSequentialOnMultiFailure is true
+   * <li>hbase.zookeeper.useMulti is true
+   * </ul>
+   * on calling multi, we get a ZooKeeper exception that can be handled by a
+   * sequential call(*), we retry the operations one-by-one (sequentially).
+   *
+   * @param zkw
+   *          - zk reference
+   * @param runSequentialOnMultiFailure
+   *          - if true when we get a ZooKeeper exception that could retry the
+   *          operations one-by-one (sequentially)
+   * @param pathRoots
+   *          - path of the parent node(s)
+   * @throws KeeperException.NotEmptyException
+   *           if node has children while deleting
+   * @throws KeeperException
+   *           if unexpected ZooKeeper exception
+   * @throws IllegalArgumentException
+   *           if an invalid path is specified
+   */
+  public static void deleteChildrenRecursivelyMultiOrSequential(
+      ZooKeeperWatcher zkw, boolean runSequentialOnMultiFailure,
+      String... pathRoots) throws KeeperException {
+    if (pathRoots == null || pathRoots.length <= 0) {
+      LOG.warn("Given path is not valid!");
+      return;
     }
+    List<ZKUtilOp> ops = new ArrayList<ZKUtil.ZKUtilOp>();
+    for (String eachRoot : pathRoots) {
+      List<String> children = listChildrenBFSNoWatch(zkw, eachRoot);
+      // Delete the leaves first and eventually get rid of the root
+      for (int i = children.size() - 1; i >= 0; --i) {
+        ops.add(ZKUtilOp.deleteNodeFailSilent(children.get(i)));
+      }
+    }
+    // atleast one element should exist
+    if (ops.size() > 0) {
+      multiOrSequential(zkw, ops, runSequentialOnMultiFailure);
+    }
+  }
+
+  /**
+   * BFS Traversal of all the children under path, with the entries in the list,
+   * in the same order as that of the traversal. Lists all the children without
+   * setting any watches.
+   *
+   * @param zkw
+   *          - zk reference
+   * @param znode
+   *          - path of node
+   * @return list of children znodes under the path
+   * @throws KeeperException
+   *           if unexpected ZooKeeper exception
+   */
+  private static List<String> listChildrenBFSNoWatch(ZooKeeperWatcher zkw,
+      final String znode) throws KeeperException {
+    Deque<String> queue = new LinkedList<String>();
+    List<String> tree = new ArrayList<String>();
+    queue.add(znode);
+    while (true) {
+      String node = queue.pollFirst();
+      if (node == null) {
+        break;
+      }
+      List<String> children = listChildrenNoWatch(zkw, node);
+      if (children == null) {
+        continue;
+      }
+      for (final String child : children) {
+        final String childPath = node + "/" + child;
+        queue.add(childPath);
+        tree.add(childPath);
+      }
+    }
+    return tree;
   }
 
   /**
@@ -1592,6 +1758,13 @@ public class ZKUtil {
       }
       sb.append("\nRegion server holding hbase:meta: "
         + new MetaTableLocator().getMetaRegionLocation(zkw));
+      Configuration conf = HBaseConfiguration.create();
+      int numMetaReplicas = conf.getInt(HConstants.META_REPLICAS_NUM,
+               HConstants.DEFAULT_META_REPLICA_NUM);
+      for (int i = 1; i < numMetaReplicas; i++) {
+        sb.append("\nRegion server holding hbase:meta, replicaId " + i + " "
+                    + new MetaTableLocator().getMetaRegionLocation(zkw, i));
+      }
       sb.append("\nRegion servers:");
       for (String child : listChildrenNoWatch(zkw, zkw.rsZNode)) {
         sb.append("\n ").append(child);
@@ -1780,7 +1953,7 @@ public class ZKUtil {
       " byte(s) of data from znode " + znode +
       (watcherSet? " and set watcher; ": "; data=") +
       (data == null? "null": data.length == 0? "empty": (
-          znode.startsWith(zkw.metaServerZNode)?
+          znode.startsWith(ZooKeeperWatcher.META_ZNODE_PREFIX)?
             getServerNameOrEmptyString(data):
           znode.startsWith(zkw.backupMasterAddressesZNode)?
             getServerNameOrEmptyString(data):
@@ -1871,7 +2044,8 @@ public class ZKUtil {
    * @see #logZKTree(ZooKeeperWatcher, String)
    * @throws KeeperException if an unexpected exception occurs
    */
-  protected static void logZKTree(ZooKeeperWatcher zkw, String root, String prefix) throws KeeperException {
+  protected static void logZKTree(ZooKeeperWatcher zkw, String root, String prefix)
+      throws KeeperException {
     List<String> children = ZKUtil.listChildrenNoWatch(zkw, root);
     if (children == null) return;
     for (String child : children) {
@@ -1929,10 +2103,10 @@ public class ZKUtil {
    */
   public static byte[] regionSequenceIdsToByteArray(final Long regionLastFlushedSequenceId,
       final Map<byte[], Long> storeSequenceIds) {
-    ZooKeeperProtos.RegionStoreSequenceIds.Builder regionSequenceIdsBuilder =
-        ZooKeeperProtos.RegionStoreSequenceIds.newBuilder();
-    ZooKeeperProtos.StoreSequenceId.Builder storeSequenceIdBuilder =
-        ZooKeeperProtos.StoreSequenceId.newBuilder();
+    ClusterStatusProtos.RegionStoreSequenceIds.Builder regionSequenceIdsBuilder =
+        ClusterStatusProtos.RegionStoreSequenceIds.newBuilder();
+    ClusterStatusProtos.StoreSequenceId.Builder storeSequenceIdBuilder =
+        ClusterStatusProtos.StoreSequenceId.newBuilder();
     if (storeSequenceIds != null) {
       for (Map.Entry<byte[], Long> e : storeSequenceIds.entrySet()){
         byte[] columnFamilyName = e.getKey();
@@ -1959,7 +2133,7 @@ public class ZKUtil {
       throw new DeserializationException("Unable to parse RegionStoreSequenceIds.");
     }
     RegionStoreSequenceIds.Builder regionSequenceIdsBuilder =
-        ZooKeeperProtos.RegionStoreSequenceIds.newBuilder();
+        ClusterStatusProtos.RegionStoreSequenceIds.newBuilder();
     int pblen = ProtobufUtil.lengthOfPBMagic();
     RegionStoreSequenceIds storeIds = null;
     try {

@@ -47,7 +47,7 @@ import org.apache.hadoop.io.RawComparator;
 import com.google.common.annotations.VisibleForTesting;
 
 /**
- * An HBase Key/Value. This is the fundamental HBase Type.  
+ * An HBase Key/Value. This is the fundamental HBase Type.
  * <p>
  * HBase applications and users should use the Cell interface and avoid directly using KeyValue
  * and member functions not defined in Cell.
@@ -268,9 +268,9 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
   ////
   // KeyValue core instance fields.
-  private byte [] bytes = null;  // an immutable byte array that contains the KV
-  private int offset = 0;  // offset into bytes buffer KV starts at
-  private int length = 0;  // length of the KV starting from offset.
+  protected byte [] bytes = null;  // an immutable byte array that contains the KV
+  protected int offset = 0;  // offset into bytes buffer KV starts at
+  protected int length = 0;  // length of the KV starting from offset.
 
   /**
    * @return True if a delete type, a {@link KeyValue.Type#Delete} or
@@ -297,6 +297,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     return seqId;
   }
 
+  @Override
   public void setSequenceId(long seqId) {
     this.seqId = seqId;
   }
@@ -577,7 +578,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     this(row, roffset, rlength, family, foffset, flength, qualifier, qoffset,
       qlength, timestamp, type, value, voffset, vlength, null);
   }
-  
+
   /**
    * Constructs KeyValue structure filled with specified values. Uses the provided buffer as the
    * data buffer.
@@ -742,10 +743,11 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
   public KeyValue(Cell c) {
     this(c.getRowArray(), c.getRowOffset(), (int)c.getRowLength(),
-        c.getFamilyArray(), c.getFamilyOffset(), (int)c.getFamilyLength(), 
-        c.getQualifierArray(), c.getQualifierOffset(), (int) c.getQualifierLength(), 
-        c.getTimestamp(), Type.codeToType(c.getTypeByte()), c.getValueArray(), c.getValueOffset(), 
+        c.getFamilyArray(), c.getFamilyOffset(), (int)c.getFamilyLength(),
+        c.getQualifierArray(), c.getQualifierOffset(), (int) c.getQualifierLength(),
+        c.getTimestamp(), Type.codeToType(c.getTypeByte()), c.getValueArray(), c.getValueOffset(),
         c.getValueLength(), c.getTagsArray(), c.getTagsOffset(), c.getTagsLength());
+    this.seqId = c.getSequenceId();
   }
 
   /**
@@ -954,15 +956,15 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       final int rlength, final byte [] family, final int foffset, int flength,
       final byte [] qualifier, final int qoffset, int qlength,
       final long timestamp, final Type type,
-      final byte [] value, final int voffset, 
+      final byte [] value, final int voffset,
       int vlength, byte[] tags, int tagsOffset, int tagsLength) {
 
     checkParameters(row, rlength, family, flength, qlength, vlength);
     checkForTagsLength(tagsLength);
     // Allocate right-sized byte array.
     int keyLength = (int) getKeyDataStructureSize(rlength, flength, qlength);
-    byte [] bytes =
-        new byte[(int) getKeyValueDataStructureSize(rlength, flength, qlength, vlength, tagsLength)];
+    byte[] bytes = new byte[(int) getKeyValueDataStructureSize(rlength, flength, qlength, vlength,
+      tagsLength)];
     // Write key, value and key row length.
     int pos = 0;
     pos = Bytes.putInt(bytes, pos, keyLength);
@@ -1114,6 +1116,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
   //
   //---------------------------------------------------------------------------
 
+  @Override
   public String toString() {
     if (this.bytes == null || this.bytes.length == 0) {
       return "empty";
@@ -1124,10 +1127,10 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
   /**
    * @param k Key portion of a KeyValue.
-   * @return Key as a String, empty string if k is null. 
+   * @return Key as a String, empty string if k is null.
    */
   public static String keyToString(final byte [] k) {
-    if (k == null) { 
+    if (k == null) {
       return "";
     }
     return keyToString(k, 0, k.length);
@@ -1463,6 +1466,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
    * save on allocations.
    * @return Value in a new byte array.
    */
+  @Override
   @Deprecated // use CellUtil.getValueArray()
   public byte [] getValue() {
     return CellUtil.cloneValue(this);
@@ -1476,6 +1480,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
    * lengths instead.
    * @return Row in a new byte array.
    */
+  @Override
   @Deprecated // use CellUtil.getRowArray()
   public byte [] getRow() {
     return CellUtil.cloneRow(this);
@@ -1533,6 +1538,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
    * lengths instead.
    * @return Returns family. Makes a copy.
    */
+  @Override
   @Deprecated // use CellUtil.getFamilyArray
   public byte [] getFamily() {
     return CellUtil.cloneFamily(this);
@@ -1547,6 +1553,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
    * Use {@link #getBuffer()} with appropriate offsets and lengths instead.
    * @return Returns qualifier. Makes a copy.
    */
+  @Override
   @Deprecated // use CellUtil.getQualifierArray
   public byte [] getQualifier() {
     return CellUtil.cloneQualifier(this);
@@ -1845,7 +1852,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       return compareFlatKey(l,loff,llen, r,roff,rlen);
     }
 
-    
+
     /**
      * Compares the only the user specified portion of a Key.  This is overridden by MetaComparator.
      * @param left
@@ -1887,6 +1894,58 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
     public int compareFlatKey(byte[] left, byte[] right) {
       return compareFlatKey(left, 0, left.length, right, 0, right.length);
+    }
+
+    // compare a key against row/fam/qual/ts/type
+    public int compareKey(Cell cell,
+        byte[] row, int roff, int rlen,
+        byte[] fam, int foff, int flen,
+        byte[] col, int coff, int clen,
+        long ts, byte type) {
+
+      int compare = compareRows(
+        cell.getRowArray(), cell.getRowOffset(), cell.getRowLength(),
+        row, roff, rlen);
+      if (compare != 0) {
+        return compare;
+      }
+      // If the column is not specified, the "minimum" key type appears the
+      // latest in the sorted order, regardless of the timestamp. This is used
+      // for specifying the last key/value in a given row, because there is no
+      // "lexicographically last column" (it would be infinitely long). The
+      // "maximum" key type does not need this behavior.
+      if (cell.getFamilyLength() + cell.getQualifierLength() == 0
+          && cell.getTypeByte() == Type.Minimum.getCode()) {
+        // left is "bigger", i.e. it appears later in the sorted order
+        return 1;
+      }
+      if (flen+clen == 0 && type == Type.Minimum.getCode()) {
+        return -1;
+      }
+
+      compare = compareFamilies(
+        cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength(),
+        fam, foff, flen);
+      if (compare != 0) {
+        return compare;
+      }
+      compare = compareColumns(
+        cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength(),
+        col, coff, clen);
+      if (compare != 0) {
+        return compare;
+      }
+      // Next compare timestamps.
+      compare = compareTimestamps(cell.getTimestamp(), ts);
+      if (compare != 0) {
+        return compare;
+      }
+
+      // Compare types. Let the delete types sort ahead of puts; i.e. types
+      // of higher numbers sort before those of lesser numbers. Maximum (255)
+      // appears ahead of everything, and minimum (0) appears after
+      // everything.
+      return (0xff & type) - (0xff & cell.getTypeByte());
     }
 
     public int compareOnlyKeyPortion(Cell left, Cell right) {
@@ -2213,7 +2272,8 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
      * @param leftKey
      * @param rightKey
      * @return 0 if equal, <0 if left smaller, >0 if right smaller
-     * @deprecated Since 0.99.2; Use {@link CellComparator#getMidpoint(Cell, Cell)} instead.
+     * @deprecated Since 0.99.2; Use
+     *             {@link CellComparator#getMidpoint(KeyValue.KVComparator, Cell, Cell) instead}
      */
     @Deprecated
     public byte[] getShortMidpointKey(final byte[] leftKey, final byte[] rightKey) {
@@ -2353,7 +2413,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     in.readFully(bytes);
     return new KeyValue(bytes, 0, length);
   }
-  
+
   /**
    * Create a new KeyValue by copying existing cell and adding new tags
    * @param c
@@ -2369,9 +2429,9 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       existingTags = newTags;
     }
     return new KeyValue(c.getRowArray(), c.getRowOffset(), (int)c.getRowLength(),
-      c.getFamilyArray(), c.getFamilyOffset(), (int)c.getFamilyLength(), 
-      c.getQualifierArray(), c.getQualifierOffset(), (int) c.getQualifierLength(), 
-      c.getTimestamp(), Type.codeToType(c.getTypeByte()), c.getValueArray(), c.getValueOffset(), 
+      c.getFamilyArray(), c.getFamilyOffset(), (int)c.getFamilyLength(),
+      c.getQualifierArray(), c.getQualifierOffset(), (int) c.getQualifierLength(),
+      c.getTimestamp(), Type.codeToType(c.getTypeByte()), c.getValueArray(), c.getValueOffset(),
       c.getValueLength(), existingTags);
   }
 
@@ -2476,6 +2536,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       this.comparator = c;
     }
 
+    @Override
     public int compare(KeyValue left, KeyValue right) {
       return comparator.compareRows(left, right);
     }
@@ -2484,7 +2545,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
   /**
    * Avoids redundant comparisons for better performance.
-   * 
+   *
    * TODO get rid of this wart
    */
   public interface SamePrefixComparator<T> {
@@ -2492,8 +2553,8 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
      * Compare two keys assuming that the first n bytes are the same.
      * @param commonPrefix How many bytes are the same.
      */
-    int compareIgnoringPrefix(
-      int commonPrefix, byte[] left, int loffset, int llength, byte[] right, int roffset, int rlength
+    int compareIgnoringPrefix(int commonPrefix, byte[] left, int loffset, int llength,
+        byte[] right, int roffset, int rlength
     );
   }
 
@@ -2507,6 +2568,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
      * TODO: With V3 consider removing this.
      * @return legacy class name for FileFileTrailer#comparatorClassName
      */
+    @Override
     public String getLegacyKeyComparatorName() {
       return "org.apache.hadoop.hbase.util.Bytes$ByteArrayComparator";
     }
@@ -2514,6 +2576,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     /**
      * @deprecated Since 0.99.2.
      */
+    @Override
     @Deprecated
     public int compareFlatKey(byte[] left, int loffset, int llength, byte[] right,
         int roffset, int rlength) {
@@ -2525,6 +2588,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       return compareOnlyKeyPortion(left, right);
     }
 
+    @Override
     @VisibleForTesting
     public int compareOnlyKeyPortion(Cell left, Cell right) {
       int c = Bytes.BYTES_RAWCOMPARATOR.compare(left.getRowArray(), left.getRowOffset(),
@@ -2551,6 +2615,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
       return (0xff & left.getTypeByte()) - (0xff & right.getTypeByte());
     }
 
+    @Override
     public byte[] calcIndexKey(byte[] lastKeyOfPreviousBlock, byte[] firstKeyInBlock) {
       return firstKeyInBlock;
     }
@@ -2582,16 +2647,15 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
    * Hence create a Keyvalue(aka Cell) that would help in comparing as two cells
    */
   public static class KeyOnlyKeyValue extends KeyValue {
-    private int length = 0;
-    private int offset = 0;
-    private byte[] b;
-
     public KeyOnlyKeyValue() {
 
     }
+    public KeyOnlyKeyValue(byte[] b) {
+      this(b, 0, b.length);
+    }
 
     public KeyOnlyKeyValue(byte[] b, int offset, int length) {
-      this.b = b;
+      this.bytes = b;
       this.length = length;
       this.offset = offset;
     }
@@ -2609,7 +2673,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
      * @param length
      */
     public void setKey(byte[] key, int offset, int length) {
-      this.b = key;
+      this.bytes = key;
       this.offset = offset;
       this.length = length;
     }
@@ -2618,13 +2682,13 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     public byte[] getKey() {
       int keylength = getKeyLength();
       byte[] key = new byte[keylength];
-      System.arraycopy(this.b, getKeyOffset(), key, 0, keylength);
+      System.arraycopy(this.bytes, getKeyOffset(), key, 0, keylength);
       return key;
     }
 
     @Override
     public byte[] getRowArray() {
-      return b;
+      return bytes;
     }
 
     @Override
@@ -2634,12 +2698,12 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
     @Override
     public byte[] getFamilyArray() {
-      return b;
+      return bytes;
     }
 
     @Override
     public byte getFamilyLength() {
-      return this.b[getFamilyOffset() - 1];
+      return this.bytes[getFamilyOffset() - 1];
     }
 
     @Override
@@ -2649,7 +2713,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
     @Override
     public byte[] getQualifierArray() {
-      return b;
+      return bytes;
     }
 
     @Override
@@ -2669,12 +2733,12 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
     @Override
     public short getRowLength() {
-      return Bytes.toShort(this.b, getKeyOffset());
+      return Bytes.toShort(this.bytes, getKeyOffset());
     }
 
     @Override
     public byte getTypeByte() {
-      return this.b[this.offset + getKeyLength() - 1];
+      return this.bytes[this.offset + getKeyLength() - 1];
     }
 
     private int getQualifierLength(int rlength, int flength) {
@@ -2684,7 +2748,7 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
     @Override
     public long getTimestamp() {
       int tsOffset = getTimestampOffset();
-      return Bytes.toLong(this.b, tsOffset);
+      return Bytes.toLong(this.bytes, tsOffset);
     }
 
     @Override
@@ -2724,10 +2788,10 @@ public class KeyValue implements Cell, HeapSize, Cloneable, SettableSequenceId, 
 
     @Override
     public String toString() {
-      if (this.b == null || this.b.length == 0) {
+      if (this.bytes == null || this.bytes.length == 0) {
         return "empty";
       }
-      return keyToString(this.b, this.offset, getKeyLength()) + "/vlen=0/mvcc=0";
+      return keyToString(this.bytes, this.offset, getKeyLength()) + "/vlen=0/mvcc=0";
     }
 
     @Override

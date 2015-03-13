@@ -301,6 +301,7 @@ Shell.load_command_group(
     truncate
     truncate_preserve
     append
+    get_splits
   ]
 )
 
@@ -349,6 +350,8 @@ Shell.load_command_group(
     list_replicated_tables
     append_peer_tableCFs
     remove_peer_tableCFs
+    enable_table_replication
+    disable_table_replication
   ]
 )
 
@@ -359,7 +362,6 @@ Shell.load_command_group(
     snapshot
     clone_snapshot
     restore_snapshot
-    rename_snapshot
     delete_snapshot
     delete_all_snapshot
     list_snapshots
@@ -401,6 +403,7 @@ Shell.load_command_group(
   :comment => "NOTE: Above commands are only applicable if running with the VisibilityController coprocessor",
   :commands => %w[
     add_labels
+    list_labels
     set_auths
     get_auths
     clear_auths

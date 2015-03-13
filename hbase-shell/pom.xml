@@ -56,7 +56,7 @@
           <execution>
             <id>default-compile</id>
             <configuration>
-              <compilerId>javac-with-errorprone</compilerId>
+              <compilerId>${java.default.compiler}</compilerId>
               <forceJavacCompilerUse>true</forceJavacCompilerUse>
               <useIncrementalCompilation>false</useIncrementalCompilation>
             </configuration>
@@ -64,7 +64,7 @@
           <execution>
             <id>default-testCompile</id>
             <configuration>
-              <compilerId>javac-with-errorprone</compilerId>
+              <compilerId>${java.default.compiler}</compilerId>
               <forceJavacCompilerUse>true</forceJavacCompilerUse>
               <useIncrementalCompilation>false</useIncrementalCompilation>
             </configuration>
@@ -231,7 +231,7 @@
     </dependency>
     <!-- Test Dependencies -->
     <dependency>
-      <groupId>org.htrace</groupId>
+      <groupId>org.apache.htrace</groupId>
       <artifactId>htrace-core</artifactId>
    </dependency>
   </dependencies>

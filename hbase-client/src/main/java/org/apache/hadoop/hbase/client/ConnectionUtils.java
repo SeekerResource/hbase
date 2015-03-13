@@ -37,7 +37,9 @@ import com.google.common.annotations.VisibleForTesting;
  * Utility used by client connections.
  */
 @InterfaceAudience.Private
-public class ConnectionUtils {
+public final class ConnectionUtils {
+
+  private ConnectionUtils() {}
 
   private static final Random RANDOM = new Random();
   /**
@@ -92,6 +94,7 @@ public class ConnectionUtils {
    */
   public static void setServerSideHConnectionRetriesConfig(
       final Configuration c, final String sn, final Log log) {
+    // TODO: Fix this. Not all connections from server side should have 10 times the retries.
     int hcRetries = c.getInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER,
       HConstants.DEFAULT_HBASE_CLIENT_RETRIES_NUMBER);
     // Go big.  Multiply by 10.  If we can't get to meta after this many retries

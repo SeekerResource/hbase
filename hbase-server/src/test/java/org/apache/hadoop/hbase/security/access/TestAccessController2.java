@@ -35,6 +35,7 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.access.Permission.Action;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -92,13 +93,13 @@ public class TestAccessController2 extends SecureTestUtil {
         try (Connection connection =
             ConnectionFactory.createConnection(TEST_UTIL.getConfiguration(), testUser)) {
           try (Admin admin = connection.getAdmin()) {
-            admin.createTable(desc);
+            createTable(TEST_UTIL, admin, desc);
           }
         }
         return null;
       }
     }, testUser);
-    TEST_UTIL.waitTableEnabled(TEST_TABLE.getTableName());
+    TEST_UTIL.waitTableAvailable(TEST_TABLE.getTableName());
     // Verify that owner permissions have been granted to the test user on the
     // table just created
     List<TablePermission> perms =
@@ -164,7 +165,7 @@ public class TestAccessController2 extends SecureTestUtil {
     AccessTestAction writeAction = new AccessTestAction() {
       @Override
       public Object run() throws Exception {
-        HTable t = new HTable(conf, AccessControlLists.ACL_TABLE_NAME);
+        Table t = TEST_UTIL.getConnection().getTable(AccessControlLists.ACL_TABLE_NAME);
         try {
           t.put(new Put(TEST_ROW).add(AccessControlLists.ACL_LIST_FAMILY, TEST_QUALIFIER,
             TEST_VALUE));
@@ -187,7 +188,7 @@ public class TestAccessController2 extends SecureTestUtil {
     AccessTestAction scanAction = new AccessTestAction() {
       @Override
       public Object run() throws Exception {
-        HTable t = new HTable(conf, AccessControlLists.ACL_TABLE_NAME);
+        Table t = TEST_UTIL.getConnection().getTable(AccessControlLists.ACL_TABLE_NAME);
         try {
           ResultScanner s = t.getScanner(new Scan());
           try {

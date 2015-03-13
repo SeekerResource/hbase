@@ -166,7 +166,7 @@ public class TestCoprocessorScanPolicy {
     .setTimeToLive(1);
     desc.addFamily(hcd);
     TEST_UTIL.getHBaseAdmin().createTable(desc);
-    Table t = new HTable(new Configuration(TEST_UTIL.getConfiguration()), tableName);
+    Table t = TEST_UTIL.getConnection().getTable(tableName);
     long now = EnvironmentEdgeManager.currentTime();
     ManualEnvironmentEdge me = new ManualEnvironmentEdge();
     me.setValue(now);
@@ -212,6 +212,7 @@ public class TestCoprocessorScanPolicy {
     // should be gone now
     assertEquals(0, r.size());
     t.close();
+    EnvironmentEdgeManager.reset();
   }
 
   public static class ScanObserver extends BaseRegionObserver {

@@ -24,7 +24,8 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.HTable;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
@@ -79,7 +80,8 @@ public class RestartMetaTest extends AbstractHBaseTool {
 
     // start the writers
     LoadTestDataGenerator dataGen = new MultiThreadedAction.DefaultDataGenerator(
-      minColDataSize, maxColDataSize, minColsPerKey, maxColsPerKey, LoadTestTool.COLUMN_FAMILY);
+      minColDataSize, maxColDataSize, minColsPerKey, maxColsPerKey,
+      LoadTestTool.DEFAULT_COLUMN_FAMILY);
     MultiThreadedWriter writer = new MultiThreadedWriter(dataGen, conf, TABLE_NAME);
     writer.setMultiPut(true);
     writer.start(startKey, endKey, numThreads);
@@ -99,7 +101,7 @@ public class RestartMetaTest extends AbstractHBaseTool {
 
     // create tables if needed
     HBaseTestingUtility.createPreSplitLoadTestTable(conf, TABLE_NAME,
-        LoadTestTool.COLUMN_FAMILY, Compression.Algorithm.NONE,
+        LoadTestTool.DEFAULT_COLUMN_FAMILY, Compression.Algorithm.NONE,
         DataBlockEncoding.NONE);
 
     LOG.debug("Loading data....\n\n");
@@ -109,7 +111,9 @@ public class RestartMetaTest extends AbstractHBaseTool {
         " seconds....\n\n");
     Threads.sleep(5 * SLEEP_SEC_AFTER_DATA_LOAD);
 
-    int metaRSPort = HBaseTestingUtility.getMetaRSPort(conf);
+    Connection connection = ConnectionFactory.createConnection(conf);
+
+    int metaRSPort = HBaseTestingUtility.getMetaRSPort(connection);
 
     LOG.debug("Killing hbase:meta region server running on port " + metaRSPort);
     hbaseCluster.killRegionServer(metaRSPort);
@@ -121,7 +125,7 @@ public class RestartMetaTest extends AbstractHBaseTool {
 
     LOG.debug("Trying to scan meta");
 
-    Table metaTable = new HTable(conf, TableName.META_TABLE_NAME);
+    Table metaTable = connection.getTable(TableName.META_TABLE_NAME);
     ResultScanner scanner = metaTable.getScanner(new Scan());
     Result result;
     while ((result = scanner.next()) != null) {
@@ -131,6 +135,8 @@ public class RestartMetaTest extends AbstractHBaseTool {
           + Bytes.toStringBinary(result.getFamilyMap(HConstants.CATALOG_FAMILY)
               .get(HConstants.SERVER_QUALIFIER)));
     }
+    metaTable.close();
+    connection.close();
     return 0;
   }
 

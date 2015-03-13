@@ -20,10 +20,12 @@
 package org.apache.hadoop.hbase.client;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,6 +45,8 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableNotFoundException;
+import org.apache.hadoop.hbase.client.AsyncProcess.AsyncRequestFuture;
+import org.apache.hadoop.hbase.client.AsyncProcess.AsyncRequestFutureImpl;
 import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
@@ -76,7 +80,7 @@ public class TestReplicasClient {
   private static final Log LOG = LogFactory.getLog(TestReplicasClient.class);
 
   static {
-    ((Log4JLogger)RpcRetryingCaller.LOG).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)RpcRetryingCallerImpl.LOG).getLogger().setLevel(Level.ALL);
   }
 
   private static final int NB_SERVERS = 1;
@@ -522,6 +526,71 @@ public class TestReplicasClient {
   }
 
   @Test
+  public void testCancelOfMultiGet() throws Exception {
+    openRegion(hriSecondary);
+    try {
+      List<Put> puts = new ArrayList<Put>(2);
+      byte[] b1 = Bytes.toBytes("testCancelOfMultiGet" + 0);
+      Put p = new Put(b1);
+      p.add(f, b1, b1);
+      puts.add(p);
+
+      byte[] b2 = Bytes.toBytes("testCancelOfMultiGet" + 1);
+      p = new Put(b2);
+      p.add(f, b2, b2);
+      puts.add(p);
+      table.put(puts);
+      LOG.debug("PUT done");
+      flushRegion(hriPrimary);
+      LOG.info("flush done");
+
+      Thread.sleep(1000 + REFRESH_PERIOD * 2);
+
+      AsyncProcess ap = ((ClusterConnection) HTU.getHBaseAdmin().getConnection())
+          .getAsyncProcess();
+
+      // Make primary slowdown
+      SlowMeCopro.getCdl().set(new CountDownLatch(1));
+
+      List<Get> gets = new ArrayList<Get>();
+      Get g = new Get(b1);
+      g.setCheckExistenceOnly(true);
+      g.setConsistency(Consistency.TIMELINE);
+      gets.add(g);
+      g = new Get(b2);
+      g.setCheckExistenceOnly(true);
+      g.setConsistency(Consistency.TIMELINE);
+      gets.add(g);
+      Object[] results = new Object[2];
+      AsyncRequestFuture reqs = ap.submitAll(table.getPool(), table.getName(),
+          gets, null, results);
+      reqs.waitUntilDone();
+      // verify we got the right results back
+      for (Object r : results) {
+        Assert.assertTrue(((Result)r).isStale());
+        Assert.assertTrue(((Result)r).getExists());
+      }
+      Set<MultiServerCallable<Row>> set = ((AsyncRequestFutureImpl<?>)reqs).getCallsInProgress();
+      // verify we did cancel unneeded calls
+      Assert.assertTrue(!set.isEmpty());
+      for (MultiServerCallable<Row> m : set) {
+        Assert.assertTrue(m.isCancelled());
+      }
+    } finally {
+      SlowMeCopro.getCdl().get().countDown();
+      SlowMeCopro.sleepTime.set(0);
+      SlowMeCopro.slowDownNext.set(false);
+      SlowMeCopro.countOfNext.set(0);
+      for (int i = 0; i < 2; i++) {
+        byte[] b1 = Bytes.toBytes("testCancelOfMultiGet" + i);
+        Delete d = new Delete(b1);
+        table.delete(d);
+      }
+      closeRegion(hriSecondary);
+    }
+  }
+
+  @Test
   public void testScanWithReplicas() throws Exception {
     //simple scan
     runMultipleScansOfOneType(false, false);
@@ -537,6 +606,54 @@ public class TestReplicasClient {
   public void testReverseScanWithReplicas() throws Exception {
     //reverse scan
     runMultipleScansOfOneType(true, false);
+  }
+
+  @Test
+  public void testCancelOfScan() throws Exception {
+    openRegion(hriSecondary);
+    int NUMROWS = 100;
+    try {
+      for (int i = 0; i < NUMROWS; i++) {
+        byte[] b1 = Bytes.toBytes("testUseRegionWithReplica" + i);
+        Put p = new Put(b1);
+        p.add(f, b1, b1);
+        table.put(p);
+      }
+      LOG.debug("PUT done");
+      int caching = 20;
+      byte[] start;
+      start = Bytes.toBytes("testUseRegionWithReplica" + 0);
+
+      flushRegion(hriPrimary);
+      LOG.info("flush done");
+      Thread.sleep(1000 + REFRESH_PERIOD * 2);
+
+      // now make some 'next' calls slow
+      SlowMeCopro.slowDownNext.set(true);
+      SlowMeCopro.countOfNext.set(0);
+      SlowMeCopro.sleepTime.set(5000);
+
+      Scan scan = new Scan(start);
+      scan.setCaching(caching);
+      scan.setConsistency(Consistency.TIMELINE);
+      ResultScanner scanner = table.getScanner(scan);
+      Iterator<Result> iter = scanner.iterator();
+      iter.next();
+      Assert.assertTrue(((ClientScanner)scanner).isAnyRPCcancelled());
+      SlowMeCopro.slowDownNext.set(false);
+      SlowMeCopro.countOfNext.set(0);
+    } finally {
+      SlowMeCopro.getCdl().get().countDown();
+      SlowMeCopro.sleepTime.set(0);
+      SlowMeCopro.slowDownNext.set(false);
+      SlowMeCopro.countOfNext.set(0);
+      for (int i = 0; i < NUMROWS; i++) {
+        byte[] b1 = Bytes.toBytes("testUseRegionWithReplica" + i);
+        Delete d = new Delete(b1);
+        table.delete(d);
+      }
+      closeRegion(hriSecondary);
+    }
   }
 
   private void runMultipleScansOfOneType(boolean reversed, boolean small) throws Exception {

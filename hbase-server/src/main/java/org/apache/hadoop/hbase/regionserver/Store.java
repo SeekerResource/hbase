@@ -32,7 +32,6 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.conf.ConfigurationObserver;
 import org.apache.hadoop.hbase.conf.PropagatingConfigurationObserver;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.compress.Compression;
@@ -42,6 +41,7 @@ import org.apache.hadoop.hbase.protobuf.generated.WALProtos.CompactionDescriptor
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionProgress;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionThroughputController;
 import org.apache.hadoop.hbase.util.Pair;
 
 /**
@@ -189,7 +189,8 @@ public interface Store extends HeapSize, StoreConfigInformation, PropagatingConf
 
   void cancelRequestedCompaction(CompactionContext compaction);
 
-  List<StoreFile> compact(CompactionContext compaction) throws IOException;
+  List<StoreFile> compact(CompactionContext compaction,
+      CompactionThroughputController throughputController) throws IOException;
 
   /**
    * @return true if we should run a major compaction.
@@ -212,9 +213,13 @@ public interface Store extends HeapSize, StoreConfigInformation, PropagatingConf
    * Call to complete a compaction. Its for the case where we find in the WAL a compaction
    * that was not finished.  We could find one recovering a WAL after a regionserver crash.
    * See HBASE-2331.
-   * @param compaction
+   * @param compaction the descriptor for compaction
+   * @param pickCompactionFiles whether or not pick up the new compaction output files and
+   * add it to the store
+   * @param removeFiles whether to remove/archive files from filesystem
    */
-  void completeCompactionMarker(CompactionDescriptor compaction)
+  void replayCompactionMarker(CompactionDescriptor compaction, boolean pickCompactionFiles,
+      boolean removeFiles)
       throws IOException;
 
   // Split oriented methods
@@ -242,7 +247,7 @@ public interface Store extends HeapSize, StoreConfigInformation, PropagatingConf
    * @param srcPathStr
    * @param sequenceId sequence Id associated with the HFile
    */
-  void bulkLoadHFile(String srcPathStr, long sequenceId) throws IOException;
+  Path bulkLoadHFile(String srcPathStr, long sequenceId) throws IOException;
 
   // General accessors into the state of the store
   // TODO abstract some of this out into a metrics class
@@ -264,7 +269,18 @@ public interface Store extends HeapSize, StoreConfigInformation, PropagatingConf
    */
   long getFlushableSize();
 
+  /**
+   * Returns the memstore snapshot size
+   * @return size of the memstore snapshot
+   */
+  long getSnapshotSize();
+
   HColumnDescriptor getFamily();
+
+  /**
+   * @return The maximum sequence id in all store files.
+   */
+  long getMaxSequenceId();
 
   /**
    * @return The maximum memstoreTS in all store files.
@@ -397,5 +413,32 @@ public interface Store extends HeapSize, StoreConfigInformation, PropagatingConf
    * the primary region files.
    * @throws IOException
    */
-   void refreshStoreFiles() throws IOException;
+  void refreshStoreFiles() throws IOException;
+
+  /**
+   * This value can represent the degree of emergency of compaction for this store. It should be
+   * greater than or equal to 0.0, any value greater than 1.0 means we have too many store files.
+   * <ul>
+   * <li>if getStorefilesCount &lt;= getMinFilesToCompact, return 0.0</li>
+   * <li>return (getStorefilesCount - getMinFilesToCompact) / (blockingFileCount -
+   * getMinFilesToCompact)</li>
+   * </ul>
+   * <p>
+   * And for striped stores, we should calculate this value by the files in each stripe separately
+   * and return the maximum value.
+   * <p>
+   * It is similar to {@link #getCompactPriority()} except that it is more suitable to use in a
+   * linear formula.
+   */
+  double getCompactionPressure();
+
+   /**
+    * Replaces the store files that the store has with the given files. Mainly used by
+    * secondary region replicas to keep up to date with
+    * the primary region files.
+    * @throws IOException
+    */
+  void refreshStoreFiles(Collection<String> newFiles) throws IOException;
+
+  void bulkLoadHFile(StoreFileInfo fileInfo) throws IOException;
 }

@@ -25,6 +25,7 @@ import java.net.InetAddress;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.ClockOutOfSyncException;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -93,6 +94,11 @@ public class TestClockSkewDetection {
       @Override
       public void stop(String why) {
       }
+
+      @Override
+      public ChoreService getChoreService() {
+        return null;
+      }
     }, null, false);
 
     LOG.debug("regionServerStartup 1");
@@ -104,7 +110,7 @@ public class TestClockSkewDetection {
     long warningSkew = c.getLong("hbase.master.warningclockskew", 1000);
 
     try {
-    	//Master Time > Region Server Time
+      //Master Time > Region Server Time
       LOG.debug("Test: Master Time > Region Server Time");
       LOG.debug("regionServerStartup 2");
       InetAddress ia2 = InetAddress.getLocalHost();

@@ -35,28 +35,10 @@ import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.MessageToMessageEncoder;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import io.netty.util.internal.StringUtil;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Chore;
-import org.apache.hadoop.hbase.ClusterStatus;
-import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
-import org.apache.hadoop.hbase.util.Addressing;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.hadoop.hbase.util.ExceptionUtil;
-import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.util.ReflectionUtils;
-import org.apache.hadoop.hbase.util.Threads;
-import org.apache.hadoop.hbase.util.VersionInfo;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -70,6 +52,22 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.ClusterStatus;
+import org.apache.hadoop.hbase.HBaseInterfaceAudience;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.ScheduledChore;
+import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos;
+import org.apache.hadoop.hbase.util.Addressing;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.ExceptionUtil;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
+import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.util.VersionInfo;
+
 
 /**
  * Class to publish the cluster status to the client. This allows them to know immediately
@@ -78,13 +76,12 @@ import java.util.concurrent.ConcurrentMap;
  *  on the client the different timeouts, as the dead servers will be detected separately.
  */
 @InterfaceAudience.Private
-public class ClusterStatusPublisher extends Chore {
+public class ClusterStatusPublisher extends ScheduledChore {
   /**
    * The implementation class used to publish the status. Default is null (no publish).
    * Use org.apache.hadoop.hbase.master.ClusterStatusPublisher.MulticastPublisher to multicast the
    * status.
    */
-  private static final Log LOG = LogFactory.getLog(ClusterStatusPublisher.class);
   public static final String STATUS_PUBLISHER_CLASS = "hbase.status.publisher.class";
   public static final Class<? extends ClusterStatusPublisher.Publisher>
       DEFAULT_STATUS_PUBLISHER_CLASS =
@@ -119,8 +116,8 @@ public class ClusterStatusPublisher extends Chore {
   public ClusterStatusPublisher(HMaster master, Configuration conf,
                                 Class<? extends Publisher> publisherClass)
       throws IOException {
-    super("HBase clusterStatusPublisher for " + master.getName(),
-        conf.getInt(STATUS_PUBLISH_PERIOD, DEFAULT_STATUS_PUBLISH_PERIOD), master);
+    super("HBase clusterStatusPublisher for " + master.getName(), master, conf.getInt(
+      STATUS_PUBLISH_PERIOD, DEFAULT_STATUS_PUBLISH_PERIOD));
     this.master = master;
     this.messagePeriod = conf.getInt(STATUS_PUBLISH_PERIOD, DEFAULT_STATUS_PUBLISH_PERIOD);
     try {
@@ -174,6 +171,7 @@ public class ClusterStatusPublisher extends Chore {
         null,
         null);
 
+
     publisher.publish(cs);
   }
 
@@ -217,7 +215,6 @@ public class ClusterStatusPublisher extends Chore {
       }
 
       res.add(toSend.getKey());
-      LOG.debug("###add dead server " + toSend.getKey());
     }
 
     return res;
@@ -257,8 +254,6 @@ public class ClusterStatusPublisher extends Chore {
 
     @Override
     public void connect(Configuration conf) throws IOException {
-      NetworkInterface ni = NetworkInterface.getByInetAddress(Addressing.getIpAddress());
-
       String mcAddress = conf.get(HConstants.STATUS_MULTICAST_ADDRESS,
           HConstants.DEFAULT_STATUS_MULTICAST_ADDRESS);
       int port = conf.getInt(HConstants.STATUS_MULTICAST_PORT,
@@ -273,13 +268,19 @@ public class ClusterStatusPublisher extends Chore {
       }
 
       final InetSocketAddress isa = new InetSocketAddress(mcAddress, port);
-      InternetProtocolFamily family = InternetProtocolFamily.IPv4;
+
+      InternetProtocolFamily family;
+      InetAddress localAddress;
       if (ina instanceof Inet6Address) {
+        localAddress = Addressing.getIp6Address();
         family = InternetProtocolFamily.IPv6;
+      }else{
+        localAddress = Addressing.getIp4Address();
+        family = InternetProtocolFamily.IPv4;
       }
+      NetworkInterface ni = NetworkInterface.getByInetAddress(localAddress);
 
       Bootstrap b = new Bootstrap();
-
       b.group(group)
       .channelFactory(new HBaseDatagramChannelFactory<Channel>(NioDatagramChannel.class, family))
       .option(ChannelOption.SO_REUSEADDR, true)

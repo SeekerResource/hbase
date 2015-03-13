@@ -90,7 +90,7 @@ public class TestBlocksRead extends HBaseTestCase {
   }
 
   /**
-   * Callers must afterward call {@link HRegion#closeHRegion(HRegion)}
+   * Callers must afterward call {@link HBaseTestingUtility#closeRegionAndWAL(HRegion)}
    * @param tableName
    * @param callingMethod
    * @param conf
@@ -112,7 +112,7 @@ public class TestBlocksRead extends HBaseTestCase {
 
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     Path path = new Path(DIR + callingMethod);
-    HRegion r = HRegion.createHRegion(info, path, conf, htd);
+    HRegion r = HBaseTestingUtility.createRegionAndWAL(info, path, conf, htd);
     blockCache = new CacheConfig(conf).getBlockCache();
     return r;
   }
@@ -265,13 +265,13 @@ public class TestBlocksRead extends HBaseTestCase {
       assertEquals(1, kvs.length);
       verifyData(kvs[0], "row", "col5", 5);
     } finally {
-      HRegion.closeHRegion(this.region);
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       this.region = null;
     }
   }
 
   /**
-   * Test # of blocks read (targetted at some of the cases Lazy Seek optimizes).
+   * Test # of blocks read (targeted at some of the cases Lazy Seek optimizes).
    *
    * @throws Exception
    */
@@ -356,8 +356,8 @@ public class TestBlocksRead extends HBaseTestCase {
       putData(FAMILY, "row", "col3", 9);
       region.flushcache();
 
-      // Baseline expected blocks read: 8. [HBASE-4532]
-      kvs = getData(FAMILY, "row", Arrays.asList("col1", "col2", "col3"), 5);
+      // Baseline expected blocks read: 6. [HBASE-4532]
+      kvs = getData(FAMILY, "row", Arrays.asList("col1", "col2", "col3"), 6, 7, 7);
       assertEquals(0, kvs.length);
  
       // File 7: Put back new data
@@ -367,14 +367,14 @@ public class TestBlocksRead extends HBaseTestCase {
       region.flushcache();
 
 
-      // Expected blocks read: 5. [HBASE-4585]
-      kvs = getData(FAMILY, "row", Arrays.asList("col1", "col2", "col3"), 5);
+      // Expected blocks read: 8. [HBASE-4585, HBASE-13109]
+      kvs = getData(FAMILY, "row", Arrays.asList("col1", "col2", "col3"), 8, 9, 9);
       assertEquals(3, kvs.length);
       verifyData(kvs[0], "row", "col1", 11);
       verifyData(kvs[1], "row", "col2", 12);
       verifyData(kvs[2], "row", "col3", 13);
     } finally {
-      HRegion.closeHRegion(this.region);
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       this.region = null;
     }
   }
@@ -423,7 +423,7 @@ public class TestBlocksRead extends HBaseTestCase {
     
       assertEquals(2 * BLOOM_TYPE.length, blocksEnd - blocksStart);
     } finally {
-      HRegion.closeHRegion(this.region);
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       this.region = null;
     }
   }
@@ -450,7 +450,7 @@ public class TestBlocksRead extends HBaseTestCase {
       assertEquals(1, kvs.length);
       verifyData(kvs[0], "row", "col99", 201);
     } finally {
-      HRegion.closeHRegion(this.region);
+      HBaseTestingUtility.closeRegionAndWAL(this.region);
       this.region = null;
     }
   }

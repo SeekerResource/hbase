@@ -47,11 +47,12 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.FilterList.Operator;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
-import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.wal.WAL;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -142,8 +143,8 @@ public class TestFilter {
     htd.addFamily(new HColumnDescriptor(NEW_FAMILIES[0]));
     htd.addFamily(new HColumnDescriptor(NEW_FAMILIES[1]));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    this.region = HRegion.createHRegion(info, TEST_UTIL.getDataTestDir(),
-            TEST_UTIL.getConfiguration(), htd);
+    this.region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+        TEST_UTIL.getConfiguration(), htd);
 
     // Insert first half
     for(byte [] ROW : ROWS_ONE) {
@@ -217,9 +218,7 @@ public class TestFilter {
 
   @After
   public void tearDown() throws Exception {
-    WAL wal = region.getWAL();
-    region.close();
-    wal.close();
+    HBaseTestingUtility.closeRegionAndWAL(region);
   }
 
   @Test
@@ -503,7 +502,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     int scannerCounter = 0;
     while (true) {
-      boolean isMoreResults = scanner.next(new ArrayList<Cell>());
+      boolean isMoreResults = NextState.hasMoreValues(scanner.next(new ArrayList<Cell>()));
       scannerCounter++;
 
       if (scannerCounter >= pageSize) {
@@ -532,7 +531,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
       ArrayList<Cell> values = new ArrayList<Cell>();
-      boolean isMoreResults = scanner.next(values);
+      boolean isMoreResults = NextState.hasMoreValues(scanner.next(values));
       if (!isMoreResults
           || !Bytes.toString(values.get(0).getRow()).startsWith(prefix)) {
         Assert.assertTrue(
@@ -566,7 +565,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     int scannerCounter = 0;
     while (true) {
-      boolean isMoreResults = scanner.next(new ArrayList<Cell>());
+      boolean isMoreResults = NextState.hasMoreValues(scanner.next(new ArrayList<Cell>()));
       scannerCounter++;
 
       if (scannerCounter >= pageSize) {
@@ -644,7 +643,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
       ArrayList<Cell> values = new ArrayList<Cell>();
-      boolean isMoreResults = scanner.next(values);
+      boolean isMoreResults = NextState.hasMoreValues(scanner.next(values));
       if (!isMoreResults || !Bytes.toString(CellUtil.cloneRow(values.get(0))).startsWith(prefix)) {
         assertTrue("The WhileMatchFilter should now filter all remaining", filter.filterAllRemaining());
       }
@@ -656,8 +655,7 @@ public class TestFilter {
 
   /**
    * Tests the the {@link WhileMatchFilter} works in combination with a
-   * {@link Filter} that uses the
-   * {@link Filter#filterKeyValue(org.apache.hadoop.hbase.KeyValue)} method.
+   * {@link Filter} that uses the {@link Filter#filterKeyValue(Cell)} method.
    *
    * See HBASE-2258.
    *
@@ -674,7 +672,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
       ArrayList<Cell> values = new ArrayList<Cell>();
-      boolean isMoreResults = scanner.next(values);
+      boolean isMoreResults = NextState.hasMoreValues(scanner.next(values));
       assertTrue("The WhileMatchFilter should now filter all remaining", filter.filterAllRemaining());
       if (!isMoreResults) {
         break;
@@ -1453,7 +1451,7 @@ public class TestFilter {
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestFilter"));
     htd.addFamily(new HColumnDescriptor(family));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    HRegion testRegion = HRegion.createHRegion(info, TEST_UTIL.getDataTestDir(),
+    HRegion testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
         TEST_UTIL.getConfiguration(), htd);
 
     for(int i=0; i<5; i++) {
@@ -1477,7 +1475,7 @@ public class TestFilter {
     InternalScanner scanner = testRegion.getScanner(s1);
     List<Cell> results = new ArrayList<Cell>();
     int resultCount = 0;
-    while(scanner.next(results)) {
+    while (NextState.hasMoreValues(scanner.next(results))) {
       resultCount++;
       byte[] row =  CellUtil.cloneRow(results.get(0));
       LOG.debug("Found row: " + Bytes.toStringBinary(row));
@@ -1619,7 +1617,7 @@ public class TestFilter {
     List<Cell> results = new ArrayList<Cell>();
     int i = 0;
     for (boolean done = true; done; i++) {
-      done = scanner.next(results);
+      done = NextState.hasMoreValues(scanner.next(results));
       Arrays.sort(results.toArray(new KeyValue[results.size()]),
           KeyValue.COMPARATOR);
       LOG.info("counter=" + i + ", " + results);
@@ -1641,7 +1639,7 @@ public class TestFilter {
     List<Cell> results = new ArrayList<Cell>();
     int i = 0;
     for (boolean done = true; done; i++) {
-      done = scanner.next(results);
+      done = NextState.hasMoreValues(scanner.next(results));
       Arrays.sort(results.toArray(new KeyValue[results.size()]),
           KeyValue.COMPARATOR);
       LOG.info("counter=" + i + ", " + results);
@@ -1663,7 +1661,7 @@ public class TestFilter {
     int row = 0;
     int idx = 0;
     for (boolean done = true; done; row++) {
-      done = scanner.next(results);
+      done = NextState.hasMoreValues(scanner.next(results));
       Arrays.sort(results.toArray(new KeyValue[results.size()]),
           KeyValue.COMPARATOR);
       if(results.isEmpty()) break;
@@ -1694,7 +1692,7 @@ public class TestFilter {
     int row = 0;
     int idx = 0;
     for (boolean more = true; more; row++) {
-      more = scanner.next(results);
+      more = NextState.hasMoreValues(scanner.next(results));
       Arrays.sort(results.toArray(new KeyValue[results.size()]),
           KeyValue.COMPARATOR);
       if(results.isEmpty()) break;
@@ -2007,13 +2005,14 @@ public class TestFilter {
     }
   }
 
+  // TODO: intentionally disabled?
   public void testNestedFilterListWithSCVF() throws IOException {
     byte[] columnStatus = Bytes.toBytes("S");
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("testNestedFilterListWithSCVF"));
     htd.addFamily(new HColumnDescriptor(FAMILIES[0]));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    HRegion testRegion = HRegion.createHRegion(info, TEST_UTIL.getDataTestDir(),
-      TEST_UTIL.getConfiguration(), htd);
+    HRegion testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+        TEST_UTIL.getConfiguration(), htd);
     for(int i=0; i<10; i++) {
       Put p = new Put(Bytes.toBytes("row" + i));
       p.setDurability(Durability.SKIP_WAL);
@@ -2029,7 +2028,7 @@ public class TestFilter {
     List<Cell> results = new ArrayList<Cell>();
     int i = 5;
     for (boolean done = true; done; i++) {
-      done = scanner.next(results);
+      done = NextState.hasMoreValues(scanner.next(results));
       assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
@@ -2052,7 +2051,7 @@ public class TestFilter {
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
-    assertFalse(scanner.next(results));
+    assertFalse(NextState.hasMoreValues(scanner.next(results)));
     // 3. let's begin to verify nested filter list
     // 3.1 add rowFilter, then add subFilterList
     FilterList filterList = new FilterList(FilterList.Operator.MUST_PASS_ONE);
@@ -2074,7 +2073,7 @@ public class TestFilter {
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
-    assertFalse(scanner.next(results));
+    assertFalse(NextState.hasMoreValues(scanner.next(results)));
     // 3.2 MAGIC here! add subFilterList first, then add rowFilter
     filterList = new FilterList(FilterList.Operator.MUST_PASS_ONE);
     filterList.addFilter(subFilterList);
@@ -2095,7 +2094,7 @@ public class TestFilter {
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
-    assertFalse(scanner.next(results));
+    assertFalse(NextState.hasMoreValues(scanner.next(results)));
     WAL wal = testRegion.getWAL();
     testRegion.close();
     wal.close();

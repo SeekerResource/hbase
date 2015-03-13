@@ -31,8 +31,9 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.hfile.AbstractHFileWriter;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
@@ -46,7 +47,7 @@ import org.apache.hadoop.io.compress.Compressor;
  * Compression validation test.  Checks compression is working.  Be sure to run
  * on every node in your cluster.
  */
-@InterfaceAudience.Public
+@InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.TOOLS)
 @InterfaceStability.Evolving
 public class CompressionTest {
   static final Log LOG = LogFactory.getLog(CompressionTest.class);
@@ -87,7 +88,7 @@ public class CompressionTest {
         return ; // already passed test, dont do it again.
       } else {
         // failed.
-        throw new IOException("Compression algorithm '" + algo.getName() + "'" +
+        throw new DoNotRetryIOException("Compression algorithm '" + algo.getName() + "'" +
         " previously failed test.");
       }
     }
@@ -98,7 +99,7 @@ public class CompressionTest {
       compressionTestResults[algo.ordinal()] = true; // passes
     } catch (Throwable t) {
       compressionTestResults[algo.ordinal()] = false; // failure
-      throw new IOException(t);
+      throw new DoNotRetryIOException(t);
     }
   }
 
@@ -135,7 +136,7 @@ public class CompressionTest {
     try {
       reader.loadFileInfo();
       HFileScanner scanner = reader.getScanner(false, true);
-      scanner.next();
+      scanner.seekTo(); // position to the start of file
       // Scanner does not do Cells yet. Do below for now till fixed.
       cc = scanner.getKeyValue();
       if (CellComparator.compareRows(c, cc) != 0) {
@@ -155,6 +156,11 @@ public class CompressionTest {
     Configuration conf = new Configuration();
     Path path = new Path(args[0]);
     FileSystem fs = path.getFileSystem(conf);
+    if (fs.exists(path)) {
+      System.err.println("The specified path exists, aborting!");
+      System.exit(1);
+    }
+
     try {
       doSmokeTest(fs, path, args[1]);
     } finally {

@@ -16,15 +16,6 @@
  */
 package org.apache.hadoop.hbase.io.encoding;
 
-import static org.junit.Assert.assertTrue;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Random;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -36,10 +27,11 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
@@ -52,6 +44,15 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+
+import static org.junit.Assert.assertTrue;
 
 /**
  * Tests changing data block encoding settings of a column family.
@@ -125,11 +126,10 @@ public class TestChangingEncoding {
         + "_col" + j);
   }
 
-  static void writeTestDataBatch(Configuration conf, TableName tableName,
+  static void writeTestDataBatch(TableName tableName,
       int batchId) throws Exception {
     LOG.debug("Writing test data batch " + batchId);
-    Table table = new HTable(conf, tableName);
-    table.setAutoFlushTo(false);
+    List<Put> puts = new ArrayList<>();
     for (int i = 0; i < NUM_ROWS_PER_BATCH; ++i) {
       Put put = new Put(getRowKey(batchId, i));
       for (int j = 0; j < NUM_COLS_PER_ROW; ++j) {
@@ -137,16 +137,18 @@ public class TestChangingEncoding {
             getValue(batchId, i, j));
       }
       put.setDurability(Durability.SKIP_WAL);
-      table.put(put);
+      puts.add(put);
     }
-    table.flushCommits();
-    table.close();
+    try (Connection conn = ConnectionFactory.createConnection(conf);
+        Table table = conn.getTable(tableName)) {
+      table.put(puts);
+    }
   }
 
-  static void verifyTestDataBatch(Configuration conf, TableName tableName,
+  static void verifyTestDataBatch(TableName tableName,
       int batchId) throws Exception {
     LOG.debug("Verifying test data batch " + batchId);
-    Table table = new HTable(conf, tableName);
+    Table table = TEST_UTIL.getConnection().getTable(tableName);
     for (int i = 0; i < NUM_ROWS_PER_BATCH; ++i) {
       Get get = new Get(getRowKey(batchId, i));
       Result result = table.get(get);
@@ -159,13 +161,13 @@ public class TestChangingEncoding {
   }
 
   private void writeSomeNewData() throws Exception {
-    writeTestDataBatch(conf, tableName, numBatchesWritten);
+    writeTestDataBatch(tableName, numBatchesWritten);
     ++numBatchesWritten;
   }
 
   private void verifyAllData() throws Exception {
     for (int i = 0; i < numBatchesWritten; ++i) {
-      verifyTestDataBatch(conf, tableName, i);
+      verifyTestDataBatch(tableName, i);
     }
   }
 

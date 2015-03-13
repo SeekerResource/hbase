@@ -29,8 +29,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -38,7 +38,9 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ClockOutOfSyncException;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.RegionLoad;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerLoad;
@@ -60,16 +62,21 @@ import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.AdminService;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.OpenRegionRequest;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.OpenRegionResponse;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.ServerInfo;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
+import org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
 import org.apache.hadoop.hbase.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RegionOpeningState;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.RetryCounter;
+import org.apache.hadoop.hbase.util.RetryCounterFactory;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.zookeeper.KeeperException;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.ServiceException;
 
 /**
@@ -95,7 +102,6 @@ import com.google.protobuf.ServiceException;
  * and has completed the handling.
  */
 @InterfaceAudience.Private
-@SuppressWarnings("deprecation")
 public class ServerManager {
   public static final String WAIT_ON_REGIONSERVERS_MAXTOSTART =
       "hbase.master.wait.on.regionservers.maxtostart";
@@ -114,8 +120,12 @@ public class ServerManager {
   // Set if we are to shutdown the cluster.
   private volatile boolean clusterShutdown = false;
 
-  private final SortedMap<byte[], Long> flushedSequenceIdByRegion =
+  private final ConcurrentNavigableMap<byte[], Long> flushedSequenceIdByRegion =
     new ConcurrentSkipListMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
+
+  private final ConcurrentNavigableMap<byte[], ConcurrentNavigableMap<byte[], Long>>
+    storeFlushedSequenceIdsByRegion =
+    new ConcurrentSkipListMap<byte[], ConcurrentNavigableMap<byte[], Long>>(Bytes.BYTES_COMPARATOR);
 
   /** Map of registered servers to their current load */
   private final ConcurrentHashMap<ServerName, ServerLoad> onlineServers =
@@ -143,6 +153,8 @@ public class ServerManager {
 
   private final long maxSkew;
   private final long warningSkew;
+
+  private final RetryCounterFactory pingRetryCounterFactory;
 
   /**
    * Set of region servers which are dead but not processed immediately. If one
@@ -202,6 +214,11 @@ public class ServerManager {
     maxSkew = c.getLong("hbase.master.maxclockskew", 30000);
     warningSkew = c.getLong("hbase.master.warningclockskew", 10000);
     this.connection = connect ? (ClusterConnection)ConnectionFactory.createConnection(c) : null;
+    int pingMaxAttempts = Math.max(1, master.getConfiguration().getInt(
+      "hbase.master.maximum.ping.server.attempts", 10));
+    int pingSleepInterval = Math.max(1, master.getConfiguration().getInt(
+      "hbase.master.ping.server.retry.sleep.interval", 100));
+    this.pingRetryCounterFactory = new RetryCounterFactory(pingMaxAttempts, pingSleepInterval);
   }
 
   /**
@@ -249,6 +266,18 @@ public class ServerManager {
     return sn;
   }
 
+  private ConcurrentNavigableMap<byte[], Long> getOrCreateStoreFlushedSequenceId(
+    byte[] regionName) {
+    ConcurrentNavigableMap<byte[], Long> storeFlushedSequenceId =
+        storeFlushedSequenceIdsByRegion.get(regionName);
+    if (storeFlushedSequenceId != null) {
+      return storeFlushedSequenceId;
+    }
+    storeFlushedSequenceId = new ConcurrentSkipListMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
+    ConcurrentNavigableMap<byte[], Long> alreadyPut =
+        storeFlushedSequenceIdsByRegion.putIfAbsent(regionName, storeFlushedSequenceId);
+    return alreadyPut == null ? storeFlushedSequenceId : alreadyPut;
+  }
   /**
    * Updates last flushed sequence Ids for the regions on server sn
    * @param sn
@@ -257,21 +286,28 @@ public class ServerManager {
   private void updateLastFlushedSequenceIds(ServerName sn, ServerLoad hsl) {
     Map<byte[], RegionLoad> regionsLoad = hsl.getRegionsLoad();
     for (Entry<byte[], RegionLoad> entry : regionsLoad.entrySet()) {
-      Long existingValue = flushedSequenceIdByRegion.get(entry.getKey());
+      byte[] encodedRegionName = Bytes.toBytes(HRegionInfo.encodeRegionName(entry.getKey()));
+      Long existingValue = flushedSequenceIdByRegion.get(encodedRegionName);
       long l = entry.getValue().getCompleteSequenceId();
-      if (existingValue != null) {
-        if (l != -1 && l < existingValue) {
-          LOG.warn("RegionServer " + sn +
-              " indicates a last flushed sequence id (" + entry.getValue() +
-              ") that is less than the previous last flushed sequence id (" +
-              existingValue + ") for region " +
-              Bytes.toString(entry.getKey()) + " Ignoring.");
-
-          continue; // Don't let smaller sequence ids override greater
-          // sequence ids.
+      // Don't let smaller sequence ids override greater sequence ids.
+      if (existingValue == null || (l != HConstants.NO_SEQNUM && l > existingValue)) {
+        flushedSequenceIdByRegion.put(encodedRegionName, l);
+      } else if (l != HConstants.NO_SEQNUM && l < existingValue) {
+        LOG.warn("RegionServer " + sn + " indicates a last flushed sequence id ("
+            + l + ") that is less than the previous last flushed sequence id ("
+            + existingValue + ") for region " + Bytes.toString(entry.getKey()) + " Ignoring.");
+      }
+      ConcurrentNavigableMap<byte[], Long> storeFlushedSequenceId =
+          getOrCreateStoreFlushedSequenceId(encodedRegionName);
+      for (StoreSequenceId storeSeqId : entry.getValue().getStoreCompleteSequenceId()) {
+        byte[] family = storeSeqId.getFamilyName().toByteArray();
+        existingValue = storeFlushedSequenceId.get(family);
+        l = storeSeqId.getSequenceId();
+        // Don't let smaller sequence ids override greater sequence ids.
+        if (existingValue == null || (l != HConstants.NO_SEQNUM && l > existingValue.longValue())) {
+          storeFlushedSequenceId.put(family, l);
         }
       }
-      flushedSequenceIdByRegion.put(entry.getKey(), l);
     }
   }
 
@@ -410,12 +446,20 @@ public class ServerManager {
     this.rsAdmins.remove(serverName);
   }
 
-  public long getLastFlushedSequenceId(byte[] regionName) {
-    long seqId = -1;
-    if (flushedSequenceIdByRegion.containsKey(regionName)) {
-      seqId = flushedSequenceIdByRegion.get(regionName);
+  public RegionStoreSequenceIds getLastFlushedSequenceId(byte[] encodedRegionName) {
+    RegionStoreSequenceIds.Builder builder = RegionStoreSequenceIds.newBuilder();
+    Long seqId = flushedSequenceIdByRegion.get(encodedRegionName);
+    builder.setLastFlushedSequenceId(seqId != null ? seqId.longValue() : HConstants.NO_SEQNUM);
+    Map<byte[], Long> storeFlushedSequenceId =
+        storeFlushedSequenceIdsByRegion.get(encodedRegionName);
+    if (storeFlushedSequenceId != null) {
+      for (Map.Entry<byte[], Long> entry : storeFlushedSequenceId.entrySet()) {
+        builder.addStoreSequenceId(StoreSequenceId.newBuilder()
+            .setFamilyName(ByteString.copyFrom(entry.getKey()))
+            .setSequenceId(entry.getValue().longValue()).build());
+      }
     }
-    return seqId;
+    return builder.build();
   }
 
   /**
@@ -762,6 +806,35 @@ public class ServerManager {
   }
 
   /**
+   * Contacts a region server and waits up to timeout ms
+   * to close the region.  This bypasses the active hmaster.
+   */
+  public static void closeRegionSilentlyAndWait(ClusterConnection connection, 
+    ServerName server, HRegionInfo region, long timeout) throws IOException, InterruptedException {
+    AdminService.BlockingInterface rs = connection.getAdmin(server);
+    try {
+      ProtobufUtil.closeRegion(rs, server, region.getRegionName());
+    } catch (IOException e) {
+      LOG.warn("Exception when closing region: " + region.getRegionNameAsString(), e);
+    }
+    long expiration = timeout + System.currentTimeMillis();
+    while (System.currentTimeMillis() < expiration) {
+      try {
+        HRegionInfo rsRegion =
+          ProtobufUtil.getRegionInfo(rs, region.getRegionName());
+        if (rsRegion == null) return;
+      } catch (IOException ioe) {
+        if (ioe instanceof NotServingRegionException) // no need to retry again
+          return;
+        LOG.warn("Exception when retrieving regioninfo from: " + region.getRegionNameAsString(), ioe);
+      }
+      Thread.sleep(1000);
+    }
+    throw new IOException("Region " + region + " failed to close within"
+        + " timeout " + timeout);
+  }
+
+  /**
    * Sends an MERGE REGIONS RPC to the specified server to merge the specified
    * regions.
    * <p>
@@ -796,9 +869,9 @@ public class ServerManager {
    */
   public boolean isServerReachable(ServerName server) {
     if (server == null) throw new NullPointerException("Passed server is null");
-    int maximumAttempts = Math.max(1, master.getConfiguration().getInt(
-      "hbase.master.maximum.ping.server.attempts", 10));
-    for (int i = 0; i < maximumAttempts; i++) {
+
+    RetryCounter retryCounter = pingRetryCounterFactory.create();
+    while (retryCounter.shouldRetry()) {
       try {
         AdminService.BlockingInterface admin = getRsAdmin(server);
         if (admin != null) {
@@ -807,8 +880,13 @@ public class ServerManager {
             && server.getStartcode() == info.getServerName().getStartCode();
         }
       } catch (IOException ioe) {
-        LOG.debug("Couldn't reach " + server + ", try=" + i
-          + " of " + maximumAttempts, ioe);
+        LOG.debug("Couldn't reach " + server + ", try=" + retryCounter.getAttemptTimes()
+          + " of " + retryCounter.getMaxAttempts(), ioe);
+        try {
+          retryCounter.sleepUntilNextRetry();
+        } catch(InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
       }
     }
     return false;

@@ -46,6 +46,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.CoordinatedStateManagerFactory;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -160,6 +161,11 @@ public class TestSplitLogManager {
 
     @Override
     public MetaTableLocator getMetaTableLocator() {
+      return null;
+    }
+
+    @Override
+    public ChoreService getChoreService() {
       return null;
     }
   }
@@ -591,12 +597,16 @@ public class TestSplitLogManager {
           for (Map.Entry<String, Task> entry : slm.getTasks().entrySet()) {
             final ServerName worker1 = ServerName.valueOf("worker1,1,1");
             SplitLogTask slt = new SplitLogTask.Done(worker1, RecoveryMode.LOG_SPLITTING);
+            boolean encounteredZKException = false;
             try {
               ZKUtil.setData(zkw, entry.getKey(), slt.toByteArray());
             } catch (KeeperException e) {
               LOG.warn(e);
+              encounteredZKException = true;
             }
-            done = true;
+            if (!encounteredZKException) {
+              done = true;
+            }
           }
         }
       };

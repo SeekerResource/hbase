@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.wal;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.hadoop.hbase.classification.InterfaceStability;
@@ -41,6 +42,9 @@ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 /**
  * A Write Ahead Log (WAL) provides service for reading, writing waledits. This interface provides
  * APIs for WAL users (such as RegionServer) to use the WAL (do append, sync, etc).
+ *
+ * Note that some internals, such as log rolling and performance evaluation tools, will use
+ * WAL.equals to determine if they have already seen a given WAL.
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
@@ -149,7 +153,7 @@ public interface WAL {
    * @return true if the flush can proceed, false in case wal is closing (ususally, when server is
    * closing) and flush couldn't be started.
    */
-  boolean startCacheFlush(final byte[] encodedRegionName);
+  boolean startCacheFlush(final byte[] encodedRegionName, Set<byte[]> flushedFamilyNames);
 
   /**
    * Complete the cache flush.
@@ -177,6 +181,14 @@ public interface WAL {
    * @return The number if present, HConstants.NO_SEQNUM if absent.
    */
   long getEarliestMemstoreSeqNum(byte[] encodedRegionName);
+
+  /**
+   * Gets the earliest sequence number in the memstore for this particular region and store.
+   * @param encodedRegionName The region to get the number for.
+   * @param familyName The family to get the number for.
+   * @return The number if present, HConstants.NO_SEQNUM if absent.
+   */
+  long getEarliestMemstoreSeqNum(byte[] encodedRegionName, byte[] familyName);
 
   /**
    * Human readable identifying information about the state of this WAL.

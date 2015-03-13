@@ -25,19 +25,16 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -175,7 +172,7 @@ public class TestLogRolling  {
 
   private void startAndWriteData() throws IOException, InterruptedException {
     // When the hbase:meta table can be opened, the region servers are running
-    new HTable(TEST_UTIL.getConfiguration(), TableName.META_TABLE_NAME);
+    TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
     this.server = cluster.getRegionServerThreads().get(0).getRegionServer();
 
     Table table = createTestTable(this.tableName);
@@ -314,11 +311,21 @@ public class TestLogRolling  {
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
 
     admin.createTable(desc);
-    Table table = new HTable(TEST_UTIL.getConfiguration(), desc.getTableName());
-    assertTrue(table.isAutoFlush());
+    Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
+    assertTrue(((HTable) table).isAutoFlush());
 
     server = TEST_UTIL.getRSForFirstRegionInTable(desc.getTableName());
     final FSHLog log = (FSHLog) server.getWAL(null);
+    final AtomicBoolean lowReplicationHookCalled = new AtomicBoolean(false);
+
+    log.registerWALActionsListener(new WALActionsListener.Base() {
+      @Override
+      public void logRollRequested(boolean lowReplication) {
+        if (lowReplication) {
+          lowReplicationHookCalled.lazySet(true);
+        }
+      }
+    });
 
     // don't run this test without append support (HDFS-200 & HDFS-142)
     assertTrue("Need append support for this test", FSUtils
@@ -370,6 +377,9 @@ public class TestLogRolling  {
     assertTrue("Missing datanode should've triggered a log roll",
         newFilenum > oldFilenum && newFilenum > curTime);
 
+    assertTrue("The log rolling hook should have been called with the low replication flag",
+        lowReplicationHookCalled.get());
+
     // write some more log data (this should use a new hdfs_out)
     writeData(table, 3);
     assertTrue("The log should not roll again.",
@@ -410,7 +420,7 @@ public class TestLogRolling  {
     LOG.info("Replication=" +
       fs.getDefaultReplication(TEST_UTIL.getDataTestDirOnTestFS()));
     // When the hbase:meta table can be opened, the region servers are running
-    Table t = new HTable(TEST_UTIL.getConfiguration(), TableName.META_TABLE_NAME);
+    Table t = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
     try {
       this.server = cluster.getRegionServer(0);
 
@@ -419,14 +429,16 @@ public class TestLogRolling  {
       desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
 
       admin.createTable(desc);
-      HTable table = new HTable(TEST_UTIL.getConfiguration(), desc.getTableName());
+      Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
 
       server = TEST_UTIL.getRSForFirstRegionInTable(desc.getTableName());
       final WAL log = server.getWAL(null);
       final List<Path> paths = new ArrayList<Path>();
       final List<Integer> preLogRolledCalled = new ArrayList<Integer>();
+
       paths.add(DefaultWALProvider.getCurrentFileName(log));
       log.registerWALActionsListener(new WALActionsListener.Base() {
+
         @Override
         public void preLogRoll(Path oldFile, Path newFile)  {
           LOG.debug("preLogRoll: oldFile="+oldFile+" newFile="+newFile);
@@ -443,8 +455,6 @@ public class TestLogRolling  {
           .isAppendSupported(TEST_UTIL.getConfiguration()));
 
       writeData(table, 1002);
-
-      table.setAutoFlushTo(true);
 
       long curTime = System.currentTimeMillis();
       LOG.info("log.getCurrentFileName()): " + DefaultWALProvider.getCurrentFileName(log));
@@ -557,7 +567,7 @@ public class TestLogRolling  {
     Table table2 = null;
 
     // When the hbase:meta table can be opened, the region servers are running
-    Table t = new HTable(TEST_UTIL.getConfiguration(), TableName.META_TABLE_NAME);
+    Table t = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
     try {
       table = createTestTable(getName());
       table2 = createTestTable(getName() + "1");
@@ -623,7 +633,7 @@ public class TestLogRolling  {
     HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(tableName));
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc);
-    return new HTable(TEST_UTIL.getConfiguration(), desc.getTableName());
+    return TEST_UTIL.getConnection().getTable(desc.getTableName());
   }
 }
 

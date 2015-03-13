@@ -18,11 +18,13 @@
 
 package org.apache.hadoop.hbase.io;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.FileNotFoundException;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -137,12 +139,12 @@ public class FileLink {
     }
 
     @Override
-    public int read(byte b[]) throws IOException {
+    public int read(byte[] b) throws IOException {
        return read(b, 0, b.length);
     }
 
     @Override
-    public int read(byte b[], int off, int len) throws IOException {
+    public int read(byte[] b, int off, int len) throws IOException {
       int n;
       try {
         n = in.read(b, off, len);
@@ -290,7 +292,7 @@ public class FileLink {
           if (pos != 0) in.seek(pos);
           assert(in.getPos() == pos) : "Link unable to seek to the right position=" + pos;
           if (LOG.isTraceEnabled()) {
-            if (currentPath != null) {
+            if (currentPath == null) {
               LOG.debug("link open path=" + path);
             } else {
               LOG.trace("link switch from path=" + currentPath + " to path=" + path);
@@ -334,6 +336,7 @@ public class FileLink {
     return locations;
   }
 
+  @Override
   public String toString() {
     StringBuilder str = new StringBuilder(getClass().getName());
     str.append(" locations=[");
@@ -422,9 +425,18 @@ public class FileLink {
    */
   protected void setLocations(Path originPath, Path... alternativePaths) {
     assert this.locations == null : "Link locations already set";
-    this.locations = new Path[1 + alternativePaths.length];
-    this.locations[0] = originPath;
-    System.arraycopy(alternativePaths, 0, this.locations, 1, alternativePaths.length);
+
+    List<Path> paths = new ArrayList<Path>(alternativePaths.length +1);
+    if (originPath != null) {
+      paths.add(originPath);
+    }
+
+    for (int i = 0; i < alternativePaths.length; i++) {
+      if (alternativePaths[i] != null) {
+        paths.add(alternativePaths[i]);
+      }
+    }
+    this.locations = paths.toArray(new Path[0]);
   }
 
   /**
@@ -460,6 +472,26 @@ public class FileLink {
   public static boolean isBackReferencesDir(final Path dirPath) {
     if (dirPath == null) return false;
     return dirPath.getName().startsWith(BACK_REFERENCES_DIRECTORY_PREFIX);
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (obj == null) {
+      return false;
+    }
+    // Assumes that the ordering of locations between objects are the same. This is true for the
+    // current subclasses already (HFileLink, WALLink). Otherwise, we may have to sort the locations
+    // or keep them presorted
+    if (this.getClass().equals(obj.getClass())) {
+      return Arrays.equals(this.locations, ((FileLink) obj).locations);
+    }
+
+    return false;
+  }
+
+  @Override
+  public int hashCode() {
+    return Arrays.hashCode(locations);
   }
 }
 

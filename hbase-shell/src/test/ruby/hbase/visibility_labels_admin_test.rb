@@ -38,6 +38,11 @@ module Hbase
       create_test_table(@test_name)
     end
 
+    def teardown
+      @test_table.close
+      shutdown
+    end
+
     define_test "Labels should be created as specified" do
       label = 'TEST_LABELS'
       count = table('hbase:labels')._count_internal
@@ -49,6 +54,7 @@ module Hbase
       label = 'TEST_AUTHS'
       user = org.apache.hadoop.hbase.security.User.getCurrent().getName();
       visibility_admin.add_labels(label)
+      $TEST_CLUSTER.waitLabelAvailable(10000, label)
       count = visibility_admin.get_auths(user).length
 
       # verifying the set functionality
@@ -69,6 +75,7 @@ module Hbase
       label = 'TEST_VISIBILITY'
       user = org.apache.hadoop.hbase.security.User.getCurrent().getName();
       visibility_admin.add_labels(label)
+      $TEST_CLUSTER.waitLabelAvailable(10000, label)
       visibility_admin.set_auths(user, label)
 
       # verifying put functionality

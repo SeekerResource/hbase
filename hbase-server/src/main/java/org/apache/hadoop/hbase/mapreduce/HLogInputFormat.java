@@ -23,7 +23,6 @@ import java.util.List;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.mapreduce.InputFormat;
@@ -33,7 +32,8 @@ import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 
 /**
- * Simple {@link InputFormat} for {@link WAL} files.
+ * Simple {@link InputFormat} for {@link org.apache.hadoop.hbase.wal.WAL} 
+ * files.
  * @deprecated use {@link WALInputFormat}
  */
 @Deprecated

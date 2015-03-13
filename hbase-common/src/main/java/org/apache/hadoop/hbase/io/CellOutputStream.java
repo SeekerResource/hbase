@@ -21,7 +21,6 @@ package org.apache.hadoop.hbase.io;
 import java.io.IOException;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 
@@ -30,8 +29,8 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * and flushes, or to build a byte[] to send to the client. This could be backed by a
  * List<KeyValue>, but more efficient implementations will append results to a
  * byte[] to eliminate overhead, and possibly encode the cells further.
- * <p>To read Cells, use {@link CellScanner}
- * @see CellScanner
+ * <p>To read Cells, use {@link org.apache.hadoop.hbase.CellScanner}
+ * @see org.apache.hadoop.hbase.CellScanner
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving

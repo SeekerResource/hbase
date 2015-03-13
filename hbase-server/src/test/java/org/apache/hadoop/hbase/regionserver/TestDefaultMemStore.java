@@ -33,22 +33,29 @@ import junit.framework.TestCase;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueTestUtil;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.TableDescriptor;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
-import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdge;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.wal.WALFactory;
 import org.junit.experimental.categories.Category;
 
 import com.google.common.base.Joiner;
@@ -101,7 +108,7 @@ public class TestDefaultMemStore extends TestCase {
     StoreScanner s = new StoreScanner(scan, scanInfo, scanType, null, memstorescanners);
     int count = 0;
     try {
-      while (s.next(result)) {
+      while (NextState.hasMoreValues(s.next(result))) {
         LOG.info(result);
         count++;
         // Row count is same as column count.
@@ -121,7 +128,7 @@ public class TestDefaultMemStore extends TestCase {
     s = new StoreScanner(scan, scanInfo, scanType, null, memstorescanners);
     count = 0;
     try {
-      while (s.next(result)) {
+      while (NextState.hasMoreValues(s.next(result))) {
         LOG.info(result);
         // Assert the stuff is coming out in right order.
         assertTrue(CellUtil.matchingRow(result.get(0), Bytes.toBytes(count)));
@@ -148,7 +155,7 @@ public class TestDefaultMemStore extends TestCase {
     count = 0;
     int snapshotIndex = 5;
     try {
-      while (s.next(result)) {
+      while (NextState.hasMoreValues(s.next(result))) {
         LOG.info(result);
         // Assert the stuff is coming out in right order.
         assertTrue(CellUtil.matchingRow(result.get(0), Bytes.toBytes(count)));
@@ -522,7 +529,7 @@ public class TestDefaultMemStore extends TestCase {
           Bytes.toBytes(startRowId)), scanInfo, scanType, null,
           memstore.getScanners(0));
       List<Cell> results = new ArrayList<Cell>();
-      for (int i = 0; scanner.next(results); i++) {
+      for (int i = 0; NextState.hasMoreValues(scanner.next(results)); i++) {
         int rowId = startRowId + i;
         Cell left = results.get(0);
         byte[] row1 = Bytes.toBytes(rowId);
@@ -836,12 +843,16 @@ public class TestDefaultMemStore extends TestCase {
     this.memstore.upsert(l, 2);// readpoint is 2
     long newSize = this.memstore.size.get();
     assert(newSize > oldSize);
-
+    //The kv1 should be removed.
+    assert(memstore.cellSet.size() == 2);
+    
     KeyValue kv4 = KeyValueTestUtil.create("r", "f", "q", 104, "v");
     kv4.setSequenceId(1);
     l.clear(); l.add(kv4);
     this.memstore.upsert(l, 3);
     assertEquals(newSize, this.memstore.size.get());
+    //The kv2 should be removed.
+    assert(memstore.cellSet.size() == 2);
     //this.memstore = null;
   }
 
@@ -926,6 +937,36 @@ public class TestDefaultMemStore extends TestCase {
     } finally {
       EnvironmentEdgeManager.reset();
     }
+  }
+
+  public void testShouldFlushMeta() throws Exception {
+    // write an edit in the META and ensure the shouldFlush (that the periodic memstore
+    // flusher invokes) returns true after META_CACHE_FLUSH_INTERVAL (even though
+    // the MEMSTORE_PERIODIC_FLUSH_INTERVAL is set to a higher value)
+    Configuration conf = new Configuration();
+    conf.setInt(HRegion.MEMSTORE_PERIODIC_FLUSH_INTERVAL, HRegion.META_CACHE_FLUSH_INTERVAL * 10);
+    HBaseTestingUtility hbaseUtility = HBaseTestingUtility.createLocalHTU(conf);
+    Path testDir = hbaseUtility.getDataTestDir();
+    EnvironmentEdgeForMemstoreTest edge = new EnvironmentEdgeForMemstoreTest();
+    EnvironmentEdgeManager.injectEdge(edge);
+    edge.setCurrentTimeMillis(1234);
+    WALFactory wFactory = new WALFactory(conf, null, "1234");
+    HRegion meta = HRegion.createHRegion(HRegionInfo.FIRST_META_REGIONINFO, testDir,
+        conf, TableDescriptor.metaTableDescriptor(conf),
+        wFactory.getMetaWAL(HRegionInfo.FIRST_META_REGIONINFO.
+            getEncodedNameAsBytes()));
+    HRegionInfo hri = new HRegionInfo(TableName.valueOf("testShouldFlushMeta"),
+        Bytes.toBytes("row_0200"), Bytes.toBytes("row_0300"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("testShouldFlushMeta"));
+    desc.addFamily(new HColumnDescriptor("foo".getBytes()));
+    HRegion r =
+        HRegion.createHRegion(hri, testDir, conf, desc,
+            wFactory.getWAL(hri.getEncodedNameAsBytes()));
+    HRegion.addRegionToMETA(meta, r);
+    edge.setCurrentTimeMillis(1234 + 100);
+    assertTrue(meta.shouldFlush() == false);
+    edge.setCurrentTimeMillis(edge.currentTime() + HRegion.META_CACHE_FLUSH_INTERVAL + 1);
+    assertTrue(meta.shouldFlush() == true);
   }
 
   private class EnvironmentEdgeForMemstoreTest implements EnvironmentEdge {

@@ -17,21 +17,6 @@
  */
 package org.apache.hadoop.hbase.rest;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.StringWriter;
-import java.security.PrivilegedExceptionAction;
-import java.util.Iterator;
-import java.util.Random;
-
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.JAXBException;
-import javax.xml.bind.Marshaller;
-import javax.xml.bind.Unmarshaller;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -40,7 +25,6 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Durability;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.protobuf.generated.VisibilityLabelsProtos.VisibilityLabelsResponse;
@@ -67,6 +51,21 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.JAXBException;
+import javax.xml.bind.Marshaller;
+import javax.xml.bind.Unmarshaller;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.StringWriter;
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+
 @Category({RestTests.class, MediumTests.class})
 public class TestScannersWithLabels {
   private static final TableName TABLE = TableName.valueOf("TestScannersWithLabels");
@@ -90,23 +89,22 @@ public class TestScannersWithLabels {
   private static Configuration conf;
 
   private static int insertData(TableName tableName, String column, double prob) throws IOException {
-    Random rng = new Random();
-    int count = 0;
-    Table table = new HTable(TEST_UTIL.getConfiguration(), tableName);
     byte[] k = new byte[3];
     byte[][] famAndQf = KeyValue.parseColumn(Bytes.toBytes(column));
 
+    List<Put> puts = new ArrayList<>();
     for (int i = 0; i < 9; i++) {
       Put put = new Put(Bytes.toBytes("row" + i));
       put.setDurability(Durability.SKIP_WAL);
       put.add(famAndQf[0], famAndQf[1], k);
       put.setCellVisibility(new CellVisibility("(" + SECRET + "|" + CONFIDENTIAL + ")" + "&" + "!"
           + TOPSECRET));
-      table.put(put);
-      count++;
+      puts.add(put);
     }
-    table.flushCommits();
-    return count;
+    try (Table table = TEST_UTIL.getConnection().getTable(tableName)) {
+      table.put(puts);
+    }
+    return puts.size();
   }
 
   private static int countCellSet(CellSetModel model) {

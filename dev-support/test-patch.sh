@@ -32,6 +32,9 @@ PROJECT_NAME=HBase
 JENKINS=false
 PATCH_DIR=/tmp
 BASEDIR=$(pwd)
+BRANCH_NAME="master"
+
+. $BASEDIR/dev-support/test-patch.properties
 
 PS=${PS:-ps}
 AWK=${AWK:-awk}
@@ -204,6 +207,38 @@ checkout () {
   return $?
 }
 
+findBranchNameFromPatchName() {
+  local patchName=$1
+  for LOCAL_BRANCH_NAME in $BRANCH_NAMES; do
+    if [[ $patchName =~ /jira/secure/attachment/[0-9]*/.*$LOCAL_BRANCH_NAME ]]; then
+      BRANCH_NAME=$LOCAL_BRANCH_NAME
+      break
+    fi
+  done
+  return 0
+}
+
+checkoutBranch() {
+  echo ""
+  echo ""
+  echo "======================================================================"
+  echo "======================================================================"
+  echo "    Testing patch on branch ${BRANCH_NAME}."
+  echo "======================================================================"
+  echo "======================================================================"
+  echo ""
+  echo ""
+  if [[ $JENKINS == "true" ]] ; then
+    if [[ "$BRANCH_NAME" != "master" ]]; then
+      echo "origin/${BRANCH_NAME} HEAD is commit `${GIT} rev-list origin/${BRANCH_NAME} -1`"
+      echo "${GIT} checkout -f  `${GIT} rev-list origin/${BRANCH_NAME} -1`"
+      ${GIT} checkout -f  `${GIT} rev-list origin/${BRANCH_NAME} -1`
+      echo "${GIT} status"
+      ${GIT} status
+    fi
+  fi
+}
+
 ###############################################################################
 setup () {
   ### Download latest patch file (ignoring .htm and .html) when run from patch process
@@ -227,9 +262,11 @@ setup () {
     echo "$patchURL"
     $WGET -q -O $PATCH_DIR/patch $patchURL
     VERSION=${GIT_COMMIT}_${defect}_PATCH-${patchNum}
+    findBranchNameFromPatchName ${relativePatchURL}
+    checkoutBranch
     JIRA_COMMENT="Here are the results of testing the latest attachment 
   $patchURL
-  against master branch at commit ${GIT_COMMIT}.
+  against ${BRANCH_NAME} branch at commit ${GIT_COMMIT}.
   ATTACHMENT ID: ${ATTACHMENT_ID}"
 
   ### Copy the patch file to $PATCH_DIR
@@ -243,7 +280,6 @@ setup () {
       cleanupAndExit 0
     fi
   fi
-  . $BASEDIR/dev-support/test-patch.properties
   ### exit if warnings are NOT defined in the properties file
   if [ -z "$OK_FINDBUGS_WARNINGS" ] || [[ -z "$OK_JAVADOC_WARNINGS" ]] || [[ -z $OK_RELEASEAUDIT_WARNINGS ]] ; then
     echo "Please define the following properties in test-patch.properties file"
@@ -342,17 +378,21 @@ checkTests () {
 ### Check there are no compilation errors, passing a file to be parsed.
 checkCompilationErrors() {
   local file=$1
+  hadoopVersion=""
+  if [ "$#" -ne 1 ]; then
+    hadoopVersion="with Hadoop version $2"
+  fi
   COMPILATION_ERROR=false
   eval $(awk '/ERROR/ {print "COMPILATION_ERROR=true"}' $file)
   if $COMPILATION_ERROR ; then
     ERRORS=$($AWK '/ERROR/ { print $0 }' $file)
     echo "======================================================================"
-    echo "There are compilation errors."
+    echo "There are compilation errors $hadoopVersion."
     echo "======================================================================"
     echo "$ERRORS"
     JIRA_COMMENT="$JIRA_COMMENT
 
-    {color:red}-1 javac{color}.  The patch appears to cause mvn compile goal to fail.
+    {color:red}-1 javac{color}.  The patch appears to cause mvn compile goal to fail $hadoopVersion.
 
     Compilation errors resume:
     $ERRORS
@@ -466,6 +506,31 @@ $JIRA_COMMENT_FOOTER"
   JIRA_COMMENT="$JIRA_COMMENT
 
     {color:green}+1 javadoc{color}.  The javadoc tool did not generate any warning messages."
+  return 0
+}
+
+checkBuildWithHadoopVersions() {
+  echo ""
+  echo ""
+  echo "======================================================================"
+  echo "======================================================================"
+  echo "    Building with all supported Hadoop versions ."
+  echo "======================================================================"
+  echo "======================================================================"
+  echo ""
+  echo ""
+  export MAVEN_OPTS="${MAVEN_OPTS}"
+  for HADOOP2_VERSION in $HADOOP2_VERSIONS ; do
+	echo "$MVN clean install -DskipTests -D${PROJECT_NAME}PatchProcess -Dhadoop-two.version=$HADOOP2_VERSION > $PATCH_DIR/patchJavacWithHadoop-$HADOOP2_VERSION.txt 2>&1"
+    $MVN clean install -DskipTests -D${PROJECT_NAME}PatchProcess -Dhadoop-two.version=$HADOOP2_VERSION > $PATCH_DIR/patchJavacWithHadoop-$HADOOP2_VERSION.txt 2>&1
+    checkCompilationErrors $PATCH_DIR/patchJavacWithHadoop-$HADOOP2_VERSION.txt $HADOOP2_VERSION
+  done
+
+  # TODO: add Hadoop3 versions and compilation here when we get the hadoop.profile=3.0 working
+
+  JIRA_COMMENT="$JIRA_COMMENT
+
+    {color:green}+1 hadoop versions{color}. The patch compiles with all supported hadoop versions ($HADOOP2_VERSIONS)"
   return 0
 }
 
@@ -920,6 +985,8 @@ if [[ $? != 0 ]] ; then
 fi
 
 checkAntiPatterns
+(( RESULT = RESULT + $? ))
+checkBuildWithHadoopVersions
 (( RESULT = RESULT + $? ))
 checkJavacWarnings
 (( RESULT = RESULT + $? ))

@@ -33,7 +33,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -44,6 +43,7 @@ import org.apache.hadoop.hbase.HDFSBlocksDistribution;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.KVComparator;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.hfile.BlockType;
@@ -162,9 +162,6 @@ public class StoreFile {
    */
   private final BloomType cfBloomType;
 
-  // the last modification time stamp
-  private long modificationTimeStamp = 0L;
-
   /**
    * Constructor, loads a reader and it's indices, etc. May allocate a
    * substantial amount of ram depending on the underlying files (10-20MB?).
@@ -214,9 +211,6 @@ public class StoreFile {
           "cfBloomType=" + cfBloomType + " (disabled in config)");
       this.cfBloomType = BloomType.NONE;
     }
-
-    // cache the modification time stamp of this store file
-    this.modificationTimeStamp = fileInfo.getModificationTime();
   }
 
   /**
@@ -228,7 +222,6 @@ public class StoreFile {
     this.fileInfo = other.fileInfo;
     this.cacheConf = other.cacheConf;
     this.cfBloomType = other.cfBloomType;
-    this.modificationTimeStamp = other.modificationTimeStamp;
   }
 
   /**
@@ -285,10 +278,15 @@ public class StoreFile {
     return this.sequenceid;
   }
 
-  public long getModificationTimeStamp() {
-    return modificationTimeStamp;
+  public long getModificationTimeStamp() throws IOException {
+    return (fileInfo == null) ? 0 : fileInfo.getModificationTime();
   }
 
+  /**
+   * Only used by the Striped Compaction Policy
+   * @param key
+   * @return value associated with the metadata key
+   */
   public byte[] getMetadataValue(byte[] key) {
     return metadataMap.get(key);
   }
@@ -1291,7 +1289,7 @@ public class StoreFile {
             // columns, a file might be skipped if using row+col Bloom filter.
             // In order to ensure this file is included an additional check is
             // required looking only for a row bloom.
-            byte[] rowBloomKey = bloomFilter.createBloomKey(row, 0, row.length,
+            byte[] rowBloomKey = bloomFilter.createBloomKey(row, rowOffset, rowLen,
                 null, 0, 0);
 
             if (keyIsAfterLast

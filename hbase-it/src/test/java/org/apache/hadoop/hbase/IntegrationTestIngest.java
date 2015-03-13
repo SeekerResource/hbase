@@ -29,6 +29,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.LoadTestTool;
+import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.Assert;
 import org.junit.Test;
@@ -44,8 +46,8 @@ import com.google.common.collect.Sets;
 public class IntegrationTestIngest extends IntegrationTestBase {
   public static final char HIPHEN = '-';
   private static final int SERVER_COUNT = 1; // number of slaves for the smallest cluster
-  private static final long DEFAULT_RUN_TIME = 20 * 60 * 1000;
-  private static final long JUNIT_RUN_TIME = 10 * 60 * 1000;
+  protected static final long DEFAULT_RUN_TIME = 20 * 60 * 1000;
+  protected static final long JUNIT_RUN_TIME = 10 * 60 * 1000;
 
   /** A soft limit on how long we should run */
   protected static final String RUN_TIME_KEY = "hbase.%s.runtime";
@@ -65,6 +67,7 @@ public class IntegrationTestIngest extends IntegrationTestBase {
   protected LoadTestTool loadTool;
 
   protected String[] LOAD_TEST_TOOL_INIT_ARGS = {
+      LoadTestTool.OPT_COLUMN_FAMILIES,
       LoadTestTool.OPT_COMPRESSION,
       LoadTestTool.OPT_DATA_BLOCK_ENCODING,
       LoadTestTool.OPT_INMEMORY,
@@ -77,7 +80,7 @@ public class IntegrationTestIngest extends IntegrationTestBase {
   public void setUpCluster() throws Exception {
     util = getTestingUtil(getConf());
     LOG.debug("Initializing/checking cluster has " + SERVER_COUNT + " servers");
-    util.initializeCluster(SERVER_COUNT);
+    util.initializeCluster(getMinServerCount());
     LOG.debug("Done initializing/checking cluster");
     cluster = util.getHBaseClusterInterface();
     deleteTableIfNecessary();
@@ -86,6 +89,10 @@ public class IntegrationTestIngest extends IntegrationTestBase {
     // Initialize load test tool before we start breaking things;
     // LoadTestTool init, even when it is a no-op, is very fragile.
     initTable();
+  }
+
+  protected int getMinServerCount() {
+    return SERVER_COUNT;
   }
 
   protected void initTable() throws IOException {
@@ -124,7 +131,22 @@ public class IntegrationTestIngest extends IntegrationTestBase {
 
   @Override
   protected Set<String> getColumnFamilies() {
-    return Sets.newHashSet(Bytes.toString(LoadTestTool.COLUMN_FAMILY));
+    Set<String> families = Sets.newHashSet();
+    String clazz = this.getClass().getSimpleName();
+    // parse conf for getting the column famly names because LTT is not initialized yet.
+    String familiesString = getConf().get(
+      String.format("%s.%s", clazz, LoadTestTool.OPT_COLUMN_FAMILIES));
+    if (familiesString == null) {
+      for (byte[] family : LoadTestTool.DEFAULT_COLUMN_FAMILIES) {
+        families.add(Bytes.toString(family));
+      }
+    } else {
+       for (String family : familiesString.split(",")) {
+         families.add(family);
+       }
+    }
+
+    return families;
   }
 
   private void deleteTableIfNecessary() throws IOException {
@@ -170,7 +192,13 @@ public class IntegrationTestIngest extends IntegrationTestBase {
         , startKey, numKeys));
       if (0 != ret) {
         String errorMsg = "Verification failed with error code " + ret;
-        LOG.error(errorMsg);
+        LOG.error(errorMsg + " Rerunning verification after 1 minute for debugging");
+        Threads.sleep(1000 * 60);
+        ret = loadTool.run(getArgsForLoadTestTool("-read", String.format("100:%d", readThreads)
+            , startKey, numKeys));
+        if (0 != ret) {
+          LOG.error("Rerun of Verification failed with error code " + ret);
+        }
         Assert.fail(errorMsg);
       }
       startKey += numKeys;
@@ -199,6 +227,8 @@ public class IntegrationTestIngest extends IntegrationTestBase {
     List<String> args = new ArrayList<String>();
     args.add("-tn");
     args.add(getTablename().getNameAsString());
+    args.add("-families");
+    args.add(getColumnFamiliesAsString());
     args.add(mode);
     args.add(modeSpecificArg);
     args.add("-start_key");
@@ -208,6 +238,10 @@ public class IntegrationTestIngest extends IntegrationTestBase {
     args.add("-skip_init");
 
     return args.toArray(new String[args.size()]);
+  }
+
+  private String getColumnFamiliesAsString() {
+    return StringUtils.join(",", getColumnFamilies());
   }
 
   /** Estimates a data size based on the cluster size */

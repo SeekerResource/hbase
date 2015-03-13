@@ -65,10 +65,10 @@ import org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.LoadTestTool;
-import org.htrace.Span;
-import org.htrace.Trace;
-import org.htrace.TraceScope;
-import org.htrace.impl.AlwaysSampler;
+import org.apache.htrace.Span;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
+import org.apache.htrace.impl.AlwaysSampler;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -189,7 +189,8 @@ public class IntegrationTestMTTR {
 
     // Set up the action that will restart a region server holding a region from our table
     // because this table should only have one region we should be good.
-    restartRSAction = new RestartRsHoldingTableAction(sleepTime, tableName.getNameAsString());
+    restartRSAction = new RestartRsHoldingTableAction(sleepTime,
+        util.getConnection().getRegionLocator(tableName));
 
     // Set up the action that will kill the region holding meta.
     restartMetaAction = new RestartRsHoldingMetaAction(sleepTime);
@@ -478,7 +479,7 @@ public class IntegrationTestMTTR {
 
     public PutCallable(Future<?> f) throws IOException {
       super(f);
-      this.table = new HTable(util.getConfiguration(), tableName);
+      this.table = util.getConnection().getTable(tableName);
     }
 
     @Override
@@ -486,7 +487,6 @@ public class IntegrationTestMTTR {
       Put p = new Put(Bytes.toBytes(RandomStringUtils.randomAlphanumeric(5)));
       p.add(FAMILY, Bytes.toBytes("\0"), Bytes.toBytes(RandomStringUtils.randomAscii(5)));
       table.put(p);
-      table.flushCommits();
       return true;
     }
 
@@ -505,7 +505,7 @@ public class IntegrationTestMTTR {
 
     public ScanCallable(Future<?> f) throws IOException {
       super(f);
-      this.table = new HTable(util.getConfiguration(), tableName);
+      this.table = util.getConnection().getTable(tableName);
     }
 
     @Override
@@ -546,7 +546,7 @@ public class IntegrationTestMTTR {
     protected boolean doAction() throws Exception {
       Admin admin = null;
       try {
-        admin = new HBaseAdmin(util.getConfiguration());
+        admin = util.getHBaseAdmin();
         ClusterStatus status = admin.getClusterStatus();
         return status != null;
       } finally {

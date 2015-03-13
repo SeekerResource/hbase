@@ -40,10 +40,11 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.After;
@@ -139,10 +140,7 @@ public class TestMergeTool extends HBaseTestCase {
     this.fs = this.dfsCluster.getFileSystem();
     System.out.println("fs=" + this.fs);
     FSUtils.setFsDefault(this.conf, new Path(fs.getUri()));
-    Path parentdir = fs.getHomeDirectory();
-    FSUtils.setRootDir(conf, parentdir);
-    fs.mkdirs(parentdir);
-    FSUtils.setVersion(fs, parentdir);
+    TEST_UTIL.createRootDir();
 
     // Note: we must call super.setUp after starting the mini cluster or
     // we will end up with a local file system
@@ -159,7 +157,8 @@ public class TestMergeTool extends HBaseTestCase {
        */
       for (int i = 0; i < sourceRegions.length; i++) {
         regions[i] =
-          HRegion.createHRegion(this.sourceRegions[i], testDir, this.conf, this.desc);
+          HBaseTestingUtility.createRegionAndWAL(this.sourceRegions[i], testDir, this.conf,
+              this.desc);
         /*
          * Insert data
          */
@@ -186,7 +185,7 @@ public class TestMergeTool extends HBaseTestCase {
     for (int i = 0; i < sourceRegions.length; i++) {
       HRegion r = regions[i];
       if (r != null) {
-        HRegion.closeHRegion(r);
+        HBaseTestingUtility.closeRegionAndWAL(r);
       }
     }
     wals.close();
@@ -233,7 +232,7 @@ public class TestMergeTool extends HBaseTestCase {
     List<Cell> testRes = null;
       while (true) {
         testRes = new ArrayList<Cell>();
-        boolean hasNext = scanner.next(testRes);
+        boolean hasNext = NextState.hasMoreValues(scanner.next(testRes));
         if (!hasNext) {
           break;
         }
@@ -275,7 +274,7 @@ public class TestMergeTool extends HBaseTestCase {
         assertTrue(Bytes.equals(bytes, rows[i][j]));
       }
       // Close the region and delete the log
-      HRegion.closeHRegion(regions[i]);
+      HBaseTestingUtility.closeRegionAndWAL(regions[i]);
     }
     WAL log = wals.getWAL(new byte[]{});
      // Merge Region 0 and Region 1

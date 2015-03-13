@@ -19,6 +19,7 @@
 
 package org.apache.hadoop.hbase.client;
 
+import java.io.IOException;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -33,10 +34,12 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellScannable;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -56,7 +59,8 @@ import org.apache.hadoop.hbase.util.Bytes;
  * To get a mapping of qualifiers to latest values for an individual family use
  * {@link #getFamilyMap(byte[])}.<p>
  *
- * To get the latest value for a specific family and qualifier use {@link #getValue(byte[], byte[])}.
+ * To get the latest value for a specific family and qualifier use
+ * {@link #getValue(byte[], byte[])}.
  *
  * A Result is backed by an array of {@link Cell} objects, each representing
  * an HBase cell defined by the row, family, qualifier, timestamp, and value.<p>
@@ -78,14 +82,25 @@ public class Result implements CellScannable, CellScanner {
   private Cell[] cells;
   private Boolean exists; // if the query was just to check existence.
   private boolean stale = false;
+
+  /**
+   * Partial results do not contain the full row's worth of cells. The result had to be returned in
+   * parts because the size of the cells in the row exceeded the RPC result size on the server.
+   * Partial results must be combined client side with results representing the remainder of the
+   * row's cells to form the complete result. Partial results and RPC result size allow us to avoid
+   * OOME on the server when servicing requests for large rows. The Scan configuration used to
+   * control the result size on the server is {@link Scan#setMaxResultSize(long)} and the default
+   * value can be seen here: {@link HConstants#DEFAULT_HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE}
+   */
+  private boolean partial = false;
   // We're not using java serialization.  Transient here is just a marker to say
   // that this is where we cache row if we're ever asked for it.
   private transient byte [] row = null;
   // Ditto for familyMap.  It can be composed on fly from passed in kvs.
-  private transient NavigableMap<byte[], NavigableMap<byte[], NavigableMap<Long, byte[]>>> familyMap = null;
+  private transient NavigableMap<byte[], NavigableMap<byte[], NavigableMap<Long, byte[]>>>
+      familyMap = null;
 
-  // never use directly
-  private static byte [] buffer = null;
+  private static ThreadLocal<byte[]> localBuffer = new ThreadLocal<byte[]>();
   private static final int PAD_WIDTH = 128;
   public static final Result EMPTY_RESULT = new Result();
 
@@ -95,12 +110,13 @@ public class Result implements CellScannable, CellScanner {
    * Index for where we are when Result is acting as a {@link CellScanner}.
    */
   private int cellScannerIndex = INITIAL_CELLSCANNER_INDEX;
+  private ClientProtos.RegionLoadStats stats;
 
   /**
    * Creates an empty Result w/ no KeyValue payload; returns null if you call {@link #rawCells()}.
-   * Use this to represent no results if <code>null</code> won't do or in old 'mapred' as oppposed to 'mapreduce' package
-   * MapReduce where you need to overwrite a Result
-   * instance with a {@link #copyFrom(Result)} call.
+   * Use this to represent no results if {@code null} won't do or in old 'mapred' as opposed
+   * to 'mapreduce' package MapReduce where you need to overwrite a Result instance with a
+   * {@link #copyFrom(Result)} call.
    */
   public Result() {
     super();
@@ -112,7 +128,7 @@ public class Result implements CellScannable, CellScanner {
    * @param cells List of cells
    */
   public static Result create(List<Cell> cells) {
-    return new Result(cells.toArray(new Cell[cells.size()]), null, false);
+    return create(cells, null);
   }
 
   public static Result create(List<Cell> cells, Boolean exists) {
@@ -120,10 +136,14 @@ public class Result implements CellScannable, CellScanner {
   }
 
   public static Result create(List<Cell> cells, Boolean exists, boolean stale) {
+    return create(cells, exists, stale, false);
+  }
+
+  public static Result create(List<Cell> cells, Boolean exists, boolean stale, boolean partial) {
     if (exists != null){
-      return new Result(null, exists, stale);
+      return new Result(null, exists, stale, partial);
     }
-    return new Result(cells.toArray(new Cell[cells.size()]), null, stale);
+    return new Result(cells.toArray(new Cell[cells.size()]), null, stale, partial);
   }
 
   /**
@@ -132,21 +152,26 @@ public class Result implements CellScannable, CellScanner {
    * @param cells array of cells
    */
   public static Result create(Cell[] cells) {
-    return new Result(cells, null, false);
+    return create(cells, null, false);
   }
 
   public static Result create(Cell[] cells, Boolean exists, boolean stale) {
+    return create(cells, exists, stale, false);
+  }
+
+  public static Result create(Cell[] cells, Boolean exists, boolean stale, boolean partial) {
     if (exists != null){
-      return new Result(null, exists, stale);
+      return new Result(null, exists, stale, partial);
     }
-    return new Result(cells, null, stale);
+    return new Result(cells, null, stale, partial);
   }
 
   /** Private ctor. Use {@link #create(Cell[])}. */
-  private Result(Cell[] cells, Boolean exists, boolean stale) {
+  private Result(Cell[] cells, Boolean exists, boolean stale, boolean partial) {
     this.cells = cells;
     this.exists = exists;
     this.stale = stale;
+    this.partial = partial;
   }
 
   /**
@@ -156,7 +181,9 @@ public class Result implements CellScannable, CellScanner {
    */
   public byte [] getRow() {
     if (this.row == null) {
-      this.row = this.cells == null || this.cells.length == 0? null: CellUtil.cloneRow(this.cells[0]);
+      this.row = (this.cells == null || this.cells.length == 0) ?
+          null :
+          CellUtil.cloneRow(this.cells[0]);
     }
     return this.row;
   }
@@ -224,7 +251,7 @@ public class Result implements CellScannable, CellScanner {
       return result; // cant find it
     }
 
-    for (int i = pos ; i < kvs.length ; i++ ) {
+    for (int i = pos; i < kvs.length; i++) {
       if (CellUtil.matchingColumn(kvs[i], family,qualifier)) {
         result.add(kvs[i]);
       } else {
@@ -275,9 +302,11 @@ public class Result implements CellScannable, CellScanner {
     double keyValueSize = (double)
         KeyValue.getKeyValueDataStructureSize(kvs[0].getRowLength(), flength, qlength, 0);
 
+    byte[] buffer = localBuffer.get();
     if (buffer == null || keyValueSize > buffer.length) {
       // pad to the smallest multiple of the pad width
       buffer = new byte[(int) Math.ceil(keyValueSize / PAD_WIDTH) * PAD_WIDTH];
+      localBuffer.set(buffer);
     }
 
     Cell searchTerm = KeyValueUtil.createFirstOnRow(buffer, 0,
@@ -354,6 +383,9 @@ public class Result implements CellScannable, CellScanner {
 
   /**
    * Get the latest version of the specified column.
+   * Note: this call clones the value content of the hosting Cell. See
+   * {@link #getValueAsByteBuffer(byte[], byte[])}, etc., or {@link #listCells()} if you would
+   * avoid the cloning.
    * @param family family name
    * @param qualifier column qualifier
    * @return value of latest version of column, null if none found
@@ -381,7 +413,8 @@ public class Result implements CellScannable, CellScanner {
     if (kv == null) {
       return null;
     }
-    return ByteBuffer.wrap(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength());
+    return ByteBuffer.wrap(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()).
+      asReadOnlyBuffer();
   }
 
   /**
@@ -404,7 +437,8 @@ public class Result implements CellScannable, CellScanner {
     if (kv == null) {
       return null;
     }
-    return ByteBuffer.wrap(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength());
+    return ByteBuffer.wrap(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()).
+      asReadOnlyBuffer();
   }
 
   /**
@@ -566,20 +600,18 @@ public class Result implements CellScannable, CellScanner {
     if(isEmpty()) {
       return null;
     }
-    this.familyMap = new TreeMap<byte[], NavigableMap<byte[], NavigableMap<Long, byte[]>>>(Bytes.BYTES_COMPARATOR);
+    this.familyMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(Cell kv : this.cells) {
       byte [] family = CellUtil.cloneFamily(kv);
-      NavigableMap<byte[], NavigableMap<Long, byte[]>> columnMap =
-        familyMap.get(family);
+      NavigableMap<byte[], NavigableMap<Long, byte[]>> columnMap = familyMap.get(family);
       if(columnMap == null) {
-        columnMap = new TreeMap<byte[], NavigableMap<Long, byte[]>>
-          (Bytes.BYTES_COMPARATOR);
+        columnMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
         familyMap.put(family, columnMap);
       }
       byte [] qualifier = CellUtil.cloneQualifier(kv);
       NavigableMap<Long, byte[]> versionMap = columnMap.get(qualifier);
       if(versionMap == null) {
-        versionMap = new TreeMap<Long, byte[]>(new Comparator<Long>() {
+        versionMap = new TreeMap<>(new Comparator<Long>() {
           @Override
           public int compare(Long l1, Long l2) {
             return l2.compareTo(l1);
@@ -736,7 +768,59 @@ public class Result implements CellScannable, CellScanner {
   }
 
   /**
-   * Get total size of raw cells 
+   * Forms a single result from the partial results in the partialResults list. This method is
+   * useful for reconstructing partial results on the client side.
+   * @param partialResults list of partial results
+   * @return The complete result that is formed by combining all of the partial results together
+   * @throws IOException A complete result cannot be formed because the results in the partial list
+   *           come from different rows
+   */
+  public static Result createCompleteResult(List<Result> partialResults)
+      throws IOException {
+    List<Cell> cells = new ArrayList<Cell>();
+    boolean stale = false;
+    byte[] prevRow = null;
+    byte[] currentRow = null;
+
+    if (partialResults != null && !partialResults.isEmpty()) {
+      for (int i = 0; i < partialResults.size(); i++) {
+        Result r = partialResults.get(i);
+        currentRow = r.getRow();
+        if (prevRow != null && !Bytes.equals(prevRow, currentRow)) {
+          throw new IOException(
+              "Cannot form complete result. Rows of partial results do not match." +
+                  " Partial Results: " + partialResults);
+        }
+
+        // Ensure that all Results except the last one are marked as partials. The last result
+        // may not be marked as a partial because Results are only marked as partials when
+        // the scan on the server side must be stopped due to reaching the maxResultSize.
+        // Visualizing it makes it easier to understand:
+        // maxResultSize: 2 cells
+        // (-x-) represents cell number x in a row
+        // Example: row1: -1- -2- -3- -4- -5- (5 cells total)
+        // How row1 will be returned by the server as partial Results:
+        // Result1: -1- -2- (2 cells, size limit reached, mark as partial)
+        // Result2: -3- -4- (2 cells, size limit reached, mark as partial)
+        // Result3: -5- (1 cell, size limit NOT reached, NOT marked as partial)
+        if (i != (partialResults.size() - 1) && !r.isPartial()) {
+          throw new IOException(
+              "Cannot form complete result. Result is missing partial flag. " +
+                  "Partial Results: " + partialResults);
+        }
+        prevRow = currentRow;
+        stale = stale || r.isStale();
+        for (Cell c : r.rawCells()) {
+          cells.add(c);
+        }
+      }
+    }
+
+    return Result.create(cells, null, stale);
+  }
+
+  /**
+   * Get total size of raw cells
    * @param result
    * @return Total size.
    */
@@ -792,5 +876,31 @@ public class Result implements CellScannable, CellScanner {
    */
   public boolean isStale() {
     return stale;
+  }
+
+  /**
+   * Whether or not the result is a partial result. Partial results contain a subset of the cells
+   * for a row and should be combined with a result representing the remaining cells in that row to
+   * form a complete (non-partial) result.
+   * @return Whether or not the result is a partial result
+   */
+  public boolean isPartial() {
+    return partial;
+  }
+
+  /**
+   * Add load information about the region to the information about the result
+   * @param loadStats statistics about the current region from which this was returned
+   */
+  public void addResults(ClientProtos.RegionLoadStats loadStats) {
+    this.stats = loadStats;
+  }
+
+  /**
+   * @return the associated statistics about the region from which this was returned. Can be
+   * <tt>null</tt> if stats are disabled.
+   */
+  public ClientProtos.RegionLoadStats getStats() {
+    return stats;
   }
 }

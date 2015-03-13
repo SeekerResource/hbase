@@ -60,7 +60,6 @@ import org.apache.hadoop.hbase.io.hfile.Cacheable;
 import org.apache.hadoop.hbase.io.hfile.CacheableDeserializer;
 import org.apache.hadoop.hbase.io.hfile.CacheableDeserializerIdManager;
 import org.apache.hadoop.hbase.io.hfile.CachedBlock;
-import org.apache.hadoop.hbase.io.hfile.CombinedBlockCache;
 import org.apache.hadoop.hbase.io.hfile.HFileBlock;
 import org.apache.hadoop.hbase.util.ConcurrentIndex;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -83,8 +82,8 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  * {@link org.apache.hadoop.hbase.io.hfile.LruBlockCache}
  *
  * <p>BucketCache can be used as mainly a block cache (see
- * {@link CombinedBlockCache}), combined with LruBlockCache to decrease CMS GC and
- * heap fragmentation.
+ * {@link org.apache.hadoop.hbase.io.hfile.CombinedBlockCache}), combined with 
+ * LruBlockCache to decrease CMS GC and heap fragmentation.
  *
  * <p>It also can be used as a secondary cache (e.g. using a file on ssd/fusionio to store
  * blocks) to enlarge cache space via
@@ -452,30 +451,36 @@ public class BucketCache implements BlockCache, HeapSize {
       this.heapSize.addAndGet(-1 * removedBlock.getData().heapSize());
     }
     BucketEntry bucketEntry = backingMap.get(cacheKey);
-    if (bucketEntry != null) {
-      IdLock.Entry lockEntry = null;
-      try {
-        lockEntry = offsetLock.getLockEntry(bucketEntry.offset());
-        if (bucketEntry.equals(backingMap.remove(cacheKey))) {
-          bucketAllocator.freeBlock(bucketEntry.offset());
-          realCacheSize.addAndGet(-1 * bucketEntry.getLength());
-          blocksByHFile.remove(cacheKey.getHfileName(), cacheKey);
-          if (removedBlock == null) {
-            this.blockNumber.decrementAndGet();
-          }
-        } else {
-          return false;
-        }
-      } catch (IOException ie) {
-        LOG.warn("Failed evicting block " + cacheKey);
+    if (bucketEntry == null) {
+      if (removedBlock != null) {
+        cacheStats.evicted(0);
+        return true;
+      } else {
         return false;
-      } finally {
-        if (lockEntry != null) {
-          offsetLock.releaseLockEntry(lockEntry);
-        }
       }
     }
-    cacheStats.evicted(bucketEntry == null? 0: bucketEntry.getCachedTime());
+    IdLock.Entry lockEntry = null;
+    try {
+      lockEntry = offsetLock.getLockEntry(bucketEntry.offset());
+      if (bucketEntry.equals(backingMap.remove(cacheKey))) {
+        bucketAllocator.freeBlock(bucketEntry.offset());
+        realCacheSize.addAndGet(-1 * bucketEntry.getLength());
+        blocksByHFile.remove(cacheKey.getHfileName(), cacheKey);
+        if (removedBlock == null) {
+          this.blockNumber.decrementAndGet();
+        }
+      } else {
+        return false;
+      }
+    } catch (IOException ie) {
+      LOG.warn("Failed evicting block " + cacheKey);
+      return false;
+    } finally {
+      if (lockEntry != null) {
+        offsetLock.releaseLockEntry(lockEntry);
+      }
+    }
+    cacheStats.evicted(bucketEntry.getCachedTime());
     return true;
   }
 

@@ -31,6 +31,8 @@ import org.apache.hadoop.hbase.client.Scan
 import org.apache.hadoop.hbase.client.HTable
 import org.apache.hadoop.hbase.client.HConnectionManager
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+import org.apache.hadoop.hbase.filter.InclusiveStopFilter;
+import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.util.Bytes
 import org.apache.hadoop.hbase.util.Writables
 import org.apache.hadoop.conf.Configuration
@@ -42,41 +44,6 @@ import org.apache.hadoop.hbase.HRegionInfo
 
 # Name of this script
 NAME = "region_mover"
-
-# Get meta table reference
-def getMetaTable(config)
-  # Keep meta reference in ruby global
-  if not $META
-    $META = HTable.new(config, HConstants::META_TABLE_NAME)
-  end
-  return $META
-end
-
-# Get table instance.
-# Maintains cache of table instances.
-def getTable(config, name)
-  # Keep dictionary of tables in ruby global
-  if not $TABLES
-    $TABLES = {}
-  end
-  key = name.toString()
-  if not $TABLES[key]
-    $TABLES[key] = HTable.new(config, name)
-  end
-  return $TABLES[key]
-end
-
-def closeTables()
-  if not $TABLES
-    return
-  end
-
-  $LOG.info("Close all tables")
-  $TABLES.each do |name, table|
-    $TABLES.delete(name)
-    table.close()
-  end
-end
 
 # Returns true if passed region is still on 'original' when we look at hbase:meta.
 def isSameServer(admin, r, original)
@@ -111,44 +78,46 @@ def getServerNameForRegion(admin, r)
       zkw.close()
     end
   end
-  table = nil
-  table = getMetaTable(admin.getConfiguration())
-  g = Get.new(r.getRegionName())
-  g.addColumn(HConstants::CATALOG_FAMILY, HConstants::SERVER_QUALIFIER)
-  g.addColumn(HConstants::CATALOG_FAMILY, HConstants::STARTCODE_QUALIFIER)
-  result = table.get(g)
-  return nil unless result
-  server = result.getValue(HConstants::CATALOG_FAMILY, HConstants::SERVER_QUALIFIER)
-  startcode = result.getValue(HConstants::CATALOG_FAMILY, HConstants::STARTCODE_QUALIFIER)
-  return nil unless server
-  return java.lang.String.new(Bytes.toString(server)).replaceFirst(":", ",")  + "," + Bytes.toLong(startcode).to_s
+  table = HTable.new(admin.getConfiguration(), HConstants::META_TABLE_NAME)
+  begin
+    g = Get.new(r.getRegionName())
+    g.addColumn(HConstants::CATALOG_FAMILY, HConstants::SERVER_QUALIFIER)
+    g.addColumn(HConstants::CATALOG_FAMILY, HConstants::STARTCODE_QUALIFIER)
+    result = table.get(g)
+    return nil unless result
+    server = result.getValue(HConstants::CATALOG_FAMILY, HConstants::SERVER_QUALIFIER)
+    startcode = result.getValue(HConstants::CATALOG_FAMILY, HConstants::STARTCODE_QUALIFIER)
+    return nil unless server
+    return java.lang.String.new(Bytes.toString(server)).replaceFirst(":", ",")  + "," + Bytes.toLong(startcode).to_s
+  ensure
+    table.close()
+  end
 end
 
 # Trys to scan a row from passed region
 # Throws exception if can't
 def isSuccessfulScan(admin, r)
-  scan = Scan.new(r.getStartKey()) 
+  scan = Scan.new(r.getStartKey(), r.getStartKey())
   scan.setBatch(1)
   scan.setCaching(1)
-  scan.setFilter(FirstKeyOnlyFilter.new()) 
+  scan.setFilter(FilterList.new(FirstKeyOnlyFilter.new(),InclusiveStopFilter().new(r.getStartKey())))
   begin
-    table = getTable(admin.getConfiguration(), r.getTableName())
+    table = HTable.new(admin.getConfiguration(), r.getTableName())
     scanner = table.getScanner(scan)
+    begin
+      results = scanner.next() 
+      # We might scan into next region, this might be an empty table.
+      # But if no exception, presume scanning is working.
+    ensure
+      scanner.close()
+    end
   rescue org.apache.hadoop.hbase.TableNotFoundException,
       org.apache.hadoop.hbase.TableNotEnabledException => e
     $LOG.warn("Region " + r.getEncodedName() + " belongs to recently " +
       "deleted/disabled table. Skipping... " + e.message)
     return
-  end
-  begin
-    results = scanner.next() 
-    # We might scan into next region, this might be an empty table.
-    # But if no exception, presume scanning is working.
   ensure
-    scanner.close()
-    # Do not close the htable. It is cached in $TABLES and 
-    # may be reused in moving another region of same table. 
-    # table.close()
+    table.close() unless table.nil?
   end
 end
 
@@ -338,13 +307,12 @@ def unloadRegions(options, hostname, port)
     puts "No regions were moved - there was no server available"
     exit 4
   end
-  movedRegions = java.util.ArrayList.new()
+  movedRegions = java.util.Collections.synchronizedList(java.util.ArrayList.new())
   while true
     rs = getRegions(config, servername)
     # Remove those already tried to move
     rs.removeAll(movedRegions)
     break if rs.length == 0
-    count = 0
     $LOG.info("Moving " + rs.length.to_s + " region(s) from " + servername +
       " on " + servers.length.to_s + " servers using " + options[:maxthreads].to_s + " threads.")
     counter = 0
@@ -398,7 +366,6 @@ def loadRegions(options, hostname, port)
     sleep 0.5
   end
   $LOG.info("Moving " + regions.size().to_s + " regions to " + servername)
-  count = 0
   # sleep 20s to make sure the rs finished initialization.
   sleep 20
   counter = 0
@@ -415,13 +382,13 @@ def loadRegions(options, hostname, port)
     next unless exists
     currentServer = getServerNameForRegion(admin, r)
     if currentServer and currentServer == servername
-      $LOG.info("Region " + r.getRegionNameAsString() + " (" + count.to_s +
+      $LOG.info("Region " + r.getRegionNameAsString() + " (" + counter.to_s +
         " of " + regions.length.to_s + ") already on target server=" + servername)
       counter = counter + 1
       next
     end
-    pool.launch(r,currentServer,count) do |_r,_currentServer,_count|
-      $LOG.info("Moving region " + _r.getRegionNameAsString() + " (" + (_count + 1).to_s +
+    pool.launch(r,currentServer,counter) do |_r,_currentServer,_counter|
+      $LOG.info("Moving region " + _r.getRegionNameAsString() + " (" + (_counter + 1).to_s +
         " of " + regions.length.to_s + ") from " + _currentServer.to_s + " to server=" +
         servername);      
       move(admin, _r, servername, _currentServer)
@@ -519,5 +486,3 @@ case ARGV[0]
     puts optparse
     exit 3
 end
-
-closeTables()

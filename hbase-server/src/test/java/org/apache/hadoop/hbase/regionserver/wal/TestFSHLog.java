@@ -30,21 +30,21 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.commons.lang.mutable.MutableBoolean;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.Coprocessor;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -67,10 +67,6 @@ import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.DefaultWALProvider;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALKey;
-import org.apache.hadoop.hdfs.DFSClient;
-import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
-import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -86,13 +82,6 @@ import org.junit.rules.TestName;
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestFSHLog {
   protected static final Log LOG = LogFactory.getLog(TestFSHLog.class);
-  {
-    ((Log4JLogger)DataNode.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LeaseManager.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LogFactory.getLog("org.apache.hadoop.hdfs.server.namenode.FSNamesystem"))
-      .getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)DFSClient.LOG).getLogger().setLevel(Level.ALL);
-  }
 
   protected static Configuration conf;
   protected static FileSystem fs;
@@ -165,18 +154,15 @@ public class TestFSHLog {
     }
   }
 
-  protected void addEdits(WAL log, HRegionInfo hri, TableName tableName,
-                        int times, AtomicLong sequenceId) throws IOException {
-    HTableDescriptor htd = new HTableDescriptor();
-    htd.addFamily(new HColumnDescriptor("row"));
-
-    final byte [] row = Bytes.toBytes("row");
+  protected void addEdits(WAL log, HRegionInfo hri, HTableDescriptor htd, int times,
+      AtomicLong sequenceId) throws IOException {
+    final byte[] row = Bytes.toBytes("row");
     for (int i = 0; i < times; i++) {
       long timestamp = System.currentTimeMillis();
       WALEdit cols = new WALEdit();
       cols.add(new KeyValue(row, row, row, timestamp, row));
-      log.append(htd, hri, new WALKey(hri.getEncodedNameAsBytes(), tableName, timestamp), cols,
-          sequenceId, true, null);
+      log.append(htd, hri, new WALKey(hri.getEncodedNameAsBytes(), htd.getTableName(), timestamp),
+        cols, sequenceId, true, null);
     }
     log.sync();
   }
@@ -186,8 +172,8 @@ public class TestFSHLog {
    * @param wal
    * @param regionEncodedName
    */
-  protected void flushRegion(WAL wal, byte[] regionEncodedName) {
-    wal.startCacheFlush(regionEncodedName);
+  protected void flushRegion(WAL wal, byte[] regionEncodedName, Set<byte[]> flushedFamilyNames) {
+    wal.startCacheFlush(regionEncodedName, flushedFamilyNames);
     wal.completeCacheFlush(regionEncodedName);
   }
 
@@ -261,10 +247,14 @@ public class TestFSHLog {
     conf1.setInt("hbase.regionserver.maxlogs", 1);
     FSHLog wal = new FSHLog(fs, FSUtils.getRootDir(conf1), dir.toString(),
         HConstants.HREGION_OLDLOGDIR_NAME, conf1, null, true, null, null);
-    TableName t1 = TableName.valueOf("t1");
-    TableName t2 = TableName.valueOf("t2");
-    HRegionInfo hri1 = new HRegionInfo(t1, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
-    HRegionInfo hri2 = new HRegionInfo(t2, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
+    HTableDescriptor t1 =
+        new HTableDescriptor(TableName.valueOf("t1")).addFamily(new HColumnDescriptor("row"));
+    HTableDescriptor t2 =
+        new HTableDescriptor(TableName.valueOf("t2")).addFamily(new HColumnDescriptor("row"));
+    HRegionInfo hri1 =
+        new HRegionInfo(t1.getTableName(), HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
+    HRegionInfo hri2 =
+        new HRegionInfo(t2.getTableName(), HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
     // variables to mock region sequenceIds
     final AtomicLong sequenceId1 = new AtomicLong(1);
     final AtomicLong sequenceId2 = new AtomicLong(1);
@@ -291,12 +281,12 @@ public class TestFSHLog {
       assertEquals(hri1.getEncodedNameAsBytes(), regionsToFlush[0]);
       // flush region 1, and roll the wal file. Only last wal which has entries for region1 should
       // remain.
-      flushRegion(wal, hri1.getEncodedNameAsBytes());
+      flushRegion(wal, hri1.getEncodedNameAsBytes(), t1.getFamiliesKeys());
       wal.rollWriter();
       // only one wal should remain now (that is for the second region).
       assertEquals(1, wal.getNumRolledLogFiles());
       // flush the second region
-      flushRegion(wal, hri2.getEncodedNameAsBytes());
+      flushRegion(wal, hri2.getEncodedNameAsBytes(), t2.getFamiliesKeys());
       wal.rollWriter(true);
       // no wal should remain now.
       assertEquals(0, wal.getNumRolledLogFiles());
@@ -313,14 +303,14 @@ public class TestFSHLog {
       regionsToFlush = wal.findRegionsToForceFlush();
       assertEquals(2, regionsToFlush.length);
       // flush both regions
-      flushRegion(wal, hri1.getEncodedNameAsBytes());
-      flushRegion(wal, hri2.getEncodedNameAsBytes());
+      flushRegion(wal, hri1.getEncodedNameAsBytes(), t1.getFamiliesKeys());
+      flushRegion(wal, hri2.getEncodedNameAsBytes(), t2.getFamiliesKeys());
       wal.rollWriter(true);
       assertEquals(0, wal.getNumRolledLogFiles());
       // Add an edit to region1, and roll the wal.
       addEdits(wal, hri1, t1, 2, sequenceId1);
       // tests partial flush: roll on a partial flush, and ensure that wal is not archived.
-      wal.startCacheFlush(hri1.getEncodedNameAsBytes());
+      wal.startCacheFlush(hri1.getEncodedNameAsBytes(), t1.getFamiliesKeys());
       wal.rollWriter();
       wal.completeCacheFlush(hri1.getEncodedNameAsBytes());
       assertEquals(1, wal.getNumRolledLogFiles());
@@ -400,7 +390,7 @@ public class TestFSHLog {
    * flush.  The addition of the sync over HRegion in flush should fix an issue where flush was
    * returning before all of its appends had made it out to the WAL (HBASE-11109).
    * @throws IOException
-   * @see HBASE-11109
+   * @see <a href="https://issues.apache.org/jira/browse/HBASE-11109">HBASE-11109</a>
    */
   @Test
   public void testFlushSequenceIdIsGreaterThanAllEditsInHFile() throws IOException {
@@ -410,9 +400,9 @@ public class TestFSHLog {
     final byte[] rowName = tableName.getName();
     final HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(new HColumnDescriptor("f"));
-    HRegion r = HRegion.createHRegion(hri, TEST_UTIL.getDefaultRootDirPath(),
-      TEST_UTIL.getConfiguration(), htd);
-    HRegion.closeHRegion(r);
+    HRegion r = HBaseTestingUtility.createRegionAndWAL(hri, TEST_UTIL.getDefaultRootDirPath(),
+        TEST_UTIL.getConfiguration(), htd);
+    HBaseTestingUtility.closeRegionAndWAL(r);
     final int countPerFamily = 10;
     final MutableBoolean goslow = new MutableBoolean(false);
     // subclass and doctor a method.

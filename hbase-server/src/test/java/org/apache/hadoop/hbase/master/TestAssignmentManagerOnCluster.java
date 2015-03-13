@@ -52,7 +52,6 @@ import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.coordination.ZkCoordinatedStateManager;
@@ -98,6 +97,8 @@ public class TestAssignmentManagerOnCluster {
       MyRegionObserver.class, RegionObserver.class);
     // Reduce the maximum attempts to speed up the test
     conf.setInt("hbase.assignment.maximum.attempts", 3);
+    conf.setInt("hbase.master.maximum.ping.server.attempts", 3);
+    conf.setInt("hbase.master.ping.server.retry.sleep.interval", 1);
 
     TEST_UTIL.startMiniCluster(1, 4, null, MyMaster.class, MyRegionServer.class);
     admin = TEST_UTIL.getHBaseAdmin();
@@ -181,7 +182,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -205,7 +206,7 @@ public class TestAssignmentManagerOnCluster {
       TEST_UTIL.deleteTable(Bytes.toBytes(table));
     }
   }
-  
+
   /**
    * This tests region assignment on a simulated restarted server
    */
@@ -224,7 +225,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       final HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -287,9 +288,9 @@ public class TestAssignmentManagerOnCluster {
 
       long timeoutTime = System.currentTimeMillis() + 800;
       while (true) {
-        List<HRegionInfo> regions =
-          regionStates.getRegionsOfTable(table);
-        if (!regions.contains(hri)) break;
+        if (regionStates.getRegionByStateOfTable(table)
+            .get(RegionState.State.OFFLINE).contains(hri))
+          break;
         long now = System.currentTimeMillis();
         if (now > timeoutTime) {
           fail("Failed to offline the region in time");
@@ -436,7 +437,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -485,7 +486,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -531,7 +532,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -573,7 +574,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -642,7 +643,8 @@ public class TestAssignmentManagerOnCluster {
       if (hri != null && serverName != null) {
         am.regionOnline(hri, serverName);
       }
-      am.getTableStateManager().setTableState(table, TableState.State.DISABLED);
+      am.getTableStateManager().setTableState(table, TableState.State.ENABLED);
+      TEST_UTIL.getHBaseAdmin().disableTable(table);
       TEST_UTIL.deleteTable(table);
     }
   }
@@ -658,7 +660,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -703,7 +705,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -776,7 +778,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -904,7 +906,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -945,7 +947,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -1024,7 +1026,7 @@ public class TestAssignmentManagerOnCluster {
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
 
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri = new HRegionInfo(
         desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -1087,7 +1089,7 @@ public class TestAssignmentManagerOnCluster {
       cluster.startRegionServer();
     }
   }
-  
+
   /**
    * Test that region state transition call is idempotent
    */
@@ -1099,7 +1101,7 @@ public class TestAssignmentManagerOnCluster {
       HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(table));
       desc.addFamily(new HColumnDescriptor(FAMILY));
       admin.createTable(desc);
-      Table meta = new HTable(conf, TableName.META_TABLE_NAME);
+      Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
       HRegionInfo hri =
           new HRegionInfo(desc.getTableName(), Bytes.toBytes("A"), Bytes.toBytes("Z"));
       MetaTableAccessor.addRegionToMeta(meta, hri);
@@ -1121,7 +1123,7 @@ public class TestAssignmentManagerOnCluster {
       TEST_UTIL.deleteTable(Bytes.toBytes(table));
     }
   }
-  
+
   /**
    * Test concurrent updates to meta when meta is not on master
    * @throws Exception
@@ -1163,7 +1165,7 @@ public class TestAssignmentManagerOnCluster {
         tableNameList.add(TableName.valueOf(name + "_" + i));
       }
     }
-    List<Result> metaRows = MetaTableAccessor.fullScanOfMeta(admin.getConnection());
+    List<Result> metaRows = MetaTableAccessor.fullScanRegions(admin.getConnection());
     int count = 0;
     // Check all 100 rows are in meta
     for (Result result : metaRows) {
@@ -1177,7 +1179,7 @@ public class TestAssignmentManagerOnCluster {
     assertTrue(count == 100);
     rss.stop();
   }
-  
+
   static class MyLoadBalancer extends StochasticLoadBalancer {
     // For this region, if specified, always assign to nowhere
     static volatile String controledRegion = null;

@@ -49,6 +49,7 @@ import org.apache.hadoop.hbase.testclassification.SecurityTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.TestTableName;
+import org.apache.hadoop.hbase.util.Threads;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 import org.junit.After;
@@ -142,6 +143,8 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
       }
     }
     TEST_UTIL.waitTableEnabled(TEST_TABLE.getTableName());
+    LOG.info("Sleeping a second because of HBASE-12581");
+    Threads.sleep(1000);
   }
 
   @Test
@@ -151,7 +154,8 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
     verifyAllowed(new AccessTestAction() {
       @Override
       public Object run() throws Exception {
-        Table t = new HTable(conf, TEST_TABLE.getTableName());
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table t = connection.getTable(TEST_TABLE.getTableName());
         try {
           Put p;
           // with ro ACL
@@ -173,6 +177,7 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
           t.put(p);
         } finally {
           t.close();
+          connection.close();
         }
         return null;
       }
@@ -185,11 +190,13 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
       public Object run() throws Exception {
         Get get = new Get(TEST_ROW);
         get.setMaxVersions(10);
-        Table t = new HTable(conf, TEST_TABLE.getTableName());
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table t = connection.getTable(TEST_TABLE.getTableName());
         try {
           return t.get(get).listCells();
         } finally {
           t.close();
+          connection.close();
         }
       }
     };
@@ -199,11 +206,13 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
       public Object run() throws Exception {
         Get get = new Get(TEST_ROW);
         get.setMaxVersions(10);
-        Table t = new HTable(conf, TEST_TABLE.getTableName());
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table t = connection.getTable(TEST_TABLE.getTableName());
         try {
           return t.get(get).listCells();
         } finally {
           t.close();
+          connection.close();
         }
       }
     };
@@ -216,7 +225,8 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
     verifyAllowed(new AccessTestAction() {
       @Override
       public Object run() throws Exception {
-        Table t = new HTable(conf, TEST_TABLE.getTableName());
+        Connection connection = ConnectionFactory.createConnection(conf);
+        Table t = connection.getTable(TEST_TABLE.getTableName());
         try {
           Put p;
           p = new Put(TEST_ROW).add(TEST_FAMILY1, TEST_Q1, ZERO);
@@ -230,6 +240,7 @@ public class TestCellACLWithMultipleVersions extends SecureTestUtil {
           t.put(p);
         } finally {
           t.close();
+          connection.close();
         }
         return null;
       }

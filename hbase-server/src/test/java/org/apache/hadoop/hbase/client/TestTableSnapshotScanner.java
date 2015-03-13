@@ -57,7 +57,7 @@ public class TestTableSnapshotScanner {
 
   public void setupCluster() throws Exception {
     setupConf(UTIL.getConfiguration());
-    UTIL.startMiniCluster(NUM_REGION_SERVERS);
+    UTIL.startMiniCluster(NUM_REGION_SERVERS, true);
     rootDir = UTIL.getHBaseCluster().getMaster().getMasterFileSystem().getRootDir();
     fs = rootDir.getFileSystem(UTIL.getConfiguration());
   }
@@ -92,7 +92,7 @@ public class TestTableSnapshotScanner {
     Admin admin = util.getHBaseAdmin();
 
     // put some stuff in the table
-    HTable table = new HTable(util.getConfiguration(), tableName);
+    Table table = util.getConnection().getTable(tableName);
     util.loadTable(table, FAMILIES);
 
     Path rootDir = FSUtils.getRootDir(util.getConfiguration());

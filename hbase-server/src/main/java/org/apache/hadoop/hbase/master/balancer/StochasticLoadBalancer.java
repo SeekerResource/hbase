@@ -30,7 +30,6 @@ import java.util.Random;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.math.stat.descriptive.DescriptiveStatistics;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ClusterStatus;
@@ -126,8 +125,14 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   private RegionReplicaRackCostFunction regionReplicaRackCostFunction;
 
   @Override
-  public void setConf(Configuration conf) {
+  public void onConfigurationChange(Configuration conf) {
+    setConf(conf);
+  }
+
+  @Override
+  public synchronized void setConf(Configuration conf) {
     super.setConf(conf);
+    LOG.info("loading config");
 
     maxSteps = conf.getInt(MAX_STEPS_KEY, maxSteps);
 
@@ -136,15 +141,19 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
 
     numRegionLoadsToRemember = conf.getInt(KEEP_REGION_LOADS, numRegionLoadsToRemember);
 
-    localityCandidateGenerator = new LocalityBasedCandidateGenerator(services);
+    if (localityCandidateGenerator == null) {
+      localityCandidateGenerator = new LocalityBasedCandidateGenerator(services);
+    }
     localityCost = new LocalityCostFunction(conf, services);
 
-    candidateGenerators = new CandidateGenerator[] {
-      new RandomCandidateGenerator(),
-      new LoadCandidateGenerator(),
-      localityCandidateGenerator,
-      new RegionReplicaRackCandidateGenerator(),
-    };
+    if (candidateGenerators == null) {
+      candidateGenerators = new CandidateGenerator[] {
+          new RandomCandidateGenerator(),
+          new LoadCandidateGenerator(),
+          localityCandidateGenerator,
+          new RegionReplicaRackCandidateGenerator(),
+      };
+    }
 
     regionLoadFunctions = new CostFromRegionLoadFunction[] {
       new ReadRequestCostFunction(conf),
@@ -176,7 +185,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   }
 
   @Override
-  public void setClusterStatus(ClusterStatus st) {
+  public synchronized void setClusterStatus(ClusterStatus st) {
     super.setClusterStatus(st);
     updateRegionLoad();
     for(CostFromRegionLoadFunction cost : regionLoadFunctions) {
@@ -185,7 +194,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   }
 
   @Override
-  public void setMasterServices(MasterServices masterServices) {
+  public synchronized void setMasterServices(MasterServices masterServices) {
     super.setMasterServices(masterServices);
     this.localityCost.setServices(masterServices);
     this.localityCandidateGenerator.setServices(masterServices);
@@ -193,7 +202,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   }
 
   @Override
-  protected boolean areSomeRegionReplicasColocated(Cluster c) {
+  protected synchronized boolean areSomeRegionReplicasColocated(Cluster c) {
     regionReplicaHostCostFunction.init(c);
     if (regionReplicaHostCostFunction.cost() > 0) return true;
     regionReplicaRackCostFunction.init(c);
@@ -206,7 +215,8 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
    * should always approach the optimal state given enough steps.
    */
   @Override
-  public List<RegionPlan> balanceCluster(Map<ServerName, List<HRegionInfo>> clusterState) {
+  public synchronized List<RegionPlan> balanceCluster(Map<ServerName,
+    List<HRegionInfo>> clusterState) {
     List<RegionPlan> plans = balanceMasterRegions(clusterState);
     if (plans != null || clusterState == null || clusterState.size() <= 1) {
       return plans;
@@ -219,10 +229,19 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
       clusterState.remove(masterServerName);
     }
 
+    // On clusters with lots of HFileLinks or lots of reference files,
+    // instantiating the storefile infos can be quite expensive.
+    // Allow turning this feature off if the locality cost is not going to
+    // be used in any computations.
+    RegionLocationFinder finder = null;
+    if (this.localityCost != null && this.localityCost.getMultiplier() > 0) {
+      finder = this.regionFinder;
+    }
+
     //The clusterState that is given to this method contains the state
     //of all the regions in the table(s) (that's true today)
     // Keep track of servers to iterate through them.
-    Cluster cluster = new Cluster(clusterState, loads, regionFinder, rackManager);
+    Cluster cluster = new Cluster(clusterState, loads, finder, rackManager);
     if (!needsBalance(cluster)) {
       return null;
     }
@@ -1007,7 +1026,9 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
         }
 
         if (index < 0) {
-          cost += 1;
+          if (regionLocations.length > 0) {
+            cost += 1;
+          }
         } else {
           cost += (double) index / (double) regionLocations.length;
         }

@@ -693,18 +693,6 @@ public interface MasterObserver extends Coprocessor {
    * @param ctx the environment to interact with the framework and master
    * @param tableNamesList the list of table names, or null if querying for all
    * @param descriptors an empty list, can be filled with what to return if bypassing
-   * @throws IOException
-   * @deprecated Use preGetTableDescriptors with regex instead.
-   */
-  @Deprecated
-  void preGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
-      List<TableName> tableNamesList, List<HTableDescriptor> descriptors) throws IOException;
-
-  /**
-   * Called before a getTableDescriptors request has been processed.
-   * @param ctx the environment to interact with the framework and master
-   * @param tableNamesList the list of table names, or null if querying for all
-   * @param descriptors an empty list, can be filled with what to return if bypassing
    * @param regex regular expression used for filtering the table names
    * @throws IOException
    */
@@ -715,23 +703,36 @@ public interface MasterObserver extends Coprocessor {
   /**
    * Called after a getTableDescriptors request has been processed.
    * @param ctx the environment to interact with the framework and master
-   * @param descriptors the list of descriptors about to be returned
-   * @throws IOException
-   * @deprecated Use postGetTableDescriptors with regex instead.
-   */
-  @Deprecated
-  void postGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
-      List<HTableDescriptor> descriptors) throws IOException;
-
-  /**
-   * Called after a getTableDescriptors request has been processed.
-   * @param ctx the environment to interact with the framework and master
+   * @param tableNamesList the list of table names, or null if querying for all
    * @param descriptors the list of descriptors about to be returned
    * @param regex regular expression used for filtering the table names
    * @throws IOException
    */
   void postGetTableDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<TableName> tableNamesList, List<HTableDescriptor> descriptors,
+      String regex) throws IOException;
+
+  /**
+   * Called before a getTableNames request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param descriptors an empty list, can be filled with what to return if bypassing
+   * @param regex regular expression used for filtering the table names
+   * @throws IOException
+   */
+  void preGetTableNames(ObserverContext<MasterCoprocessorEnvironment> ctx,
       List<HTableDescriptor> descriptors, String regex) throws IOException;
+
+  /**
+   * Called after a getTableNames request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param descriptors the list of descriptors about to be returned
+   * @param regex regular expression used for filtering the table names
+   * @throws IOException
+   */
+  void postGetTableNames(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<HTableDescriptor> descriptors, String regex) throws IOException;
+
+
 
   /**
    * Called before a new namespace is created by
@@ -786,6 +787,43 @@ public interface MasterObserver extends Coprocessor {
    */
   void postModifyNamespace(final ObserverContext<MasterCoprocessorEnvironment> ctx,
       NamespaceDescriptor ns) throws IOException;
+
+  /**
+   * Called before a getNamespaceDescriptor request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param namespace the name of the namespace
+   * @throws IOException
+   */
+  void preGetNamespaceDescriptor(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      String namespace) throws IOException;
+
+  /**
+   * Called after a getNamespaceDescriptor request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param ns the NamespaceDescriptor
+   * @throws IOException
+   */
+  void postGetNamespaceDescriptor(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      NamespaceDescriptor ns) throws IOException;
+
+  /**
+   * Called before a listNamespaceDescriptors request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param descriptors an empty list, can be filled with what to return if bypassing
+   * @throws IOException
+   */
+  void preListNamespaceDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<NamespaceDescriptor> descriptors) throws IOException;
+
+  /**
+   * Called after a listNamespaceDescriptors request has been processed.
+   * @param ctx the environment to interact with the framework and master
+   * @param descriptors the list of descriptors about to be returned
+   * @throws IOException
+   */
+  void postListNamespaceDescriptors(ObserverContext<MasterCoprocessorEnvironment> ctx,
+      List<NamespaceDescriptor> descriptors) throws IOException;
+
 
   /**
    * Called before the table memstore is flushed to disk.

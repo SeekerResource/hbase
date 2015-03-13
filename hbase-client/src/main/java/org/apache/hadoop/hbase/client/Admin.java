@@ -31,13 +31,11 @@ import org.apache.hadoop.hbase.ClusterStatus;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.MasterNotRunningException;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableExistsException;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
@@ -117,12 +115,72 @@ public interface Admin extends Abortable, Closeable {
   HTableDescriptor[] listTables(String regex) throws IOException;
 
   /**
+   * List all the tables matching the given pattern.
+   *
+   * @param pattern The compiled regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
+   * @return - returns an array of HTableDescriptors
+   * @throws IOException if a remote or network exception occurs
+   * @see #listTables()
+   */
+  HTableDescriptor[] listTables(Pattern pattern, boolean includeSysTables)
+      throws IOException;
+
+  /**
+   * List all the tables matching the given pattern.
+   *
+   * @param regex The regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
+   * @return - returns an array of HTableDescriptors
+   * @throws IOException if a remote or network exception occurs
+   * @see #listTables(java.util.regex.Pattern, boolean)
+   */
+  HTableDescriptor[] listTables(String regex, boolean includeSysTables)
+      throws IOException;
+
+  /**
    * List all of the names of userspace tables.
    *
    * @return TableName[] table names
    * @throws IOException if a remote or network exception occurs
    */
   TableName[] listTableNames() throws IOException;
+
+  /**
+   * List all of the names of userspace tables.
+   * @param pattern The regular expression to match against
+   * @return TableName[] table names
+   * @throws IOException if a remote or network exception occurs
+   */
+  TableName[] listTableNames(Pattern pattern) throws IOException;
+
+  /**
+   * List all of the names of userspace tables.
+   * @param regex The regular expression to match against
+   * @return TableName[] table names
+   * @throws IOException if a remote or network exception occurs
+   */
+  TableName[] listTableNames(String regex) throws IOException;
+
+  /**
+   * List all of the names of userspace tables.
+   * @param pattern The regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
+   * @return TableName[] table names
+   * @throws IOException if a remote or network exception occurs
+   */
+  TableName[] listTableNames(final Pattern pattern, final boolean includeSysTables)
+      throws IOException;
+
+  /**
+   * List all of the names of userspace tables.
+   * @param regex The regular expression to match against
+   * @param includeSysTables False to match only against userspace tables
+   * @return TableName[] table names
+   * @throws IOException if a remote or network exception occurs
+   */
+  TableName[] listTableNames(final String regex, final boolean includeSysTables)
+      throws IOException;
 
   /**
    * Method for getting the tableDescriptor
@@ -898,6 +956,32 @@ public interface Admin extends Abortable, Closeable {
    */
   AdminProtos.GetRegionInfoResponse.CompactionState getCompactionStateForRegion(
     final byte[] regionName) throws IOException;
+
+  /**
+   * Get the timestamp of the last major compaction for the passed table
+   *
+   * The timestamp of the oldest HFile resulting from a major compaction of that table,
+   * or 0 if no such HFile could be found.
+   *
+   * @param tableName table to examine
+   * @return the last major compaction timestamp or 0
+   * @throws IOException if a remote or network exception occurs
+   */
+  long getLastMajorCompactionTimestamp(final TableName tableName)
+    throws IOException;
+
+  /**
+   * Get the timestamp of the last major compaction for the passed region.
+   *
+   * The timestamp of the oldest HFile resulting from a major compaction of that region,
+   * or 0 if no such HFile could be found.
+   *
+   * @param regionName region to examine
+   * @return the last major compaction timestamp or 0
+   * @throws IOException if a remote or network exception occurs
+   */
+  long getLastMajorCompactionTimestampForRegion(final byte[] regionName)
+      throws IOException;
 
   /**
    * Take a snapshot for the given table. If the table is enabled, a FLUSH-type snapshot will be

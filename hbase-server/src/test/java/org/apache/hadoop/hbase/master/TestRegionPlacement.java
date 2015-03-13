@@ -42,15 +42,14 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.HTable;
-import org.apache.hadoop.hbase.client.MetaScanner;
-import org.apache.hadoop.hbase.client.MetaScanner.MetaScannerVisitor;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.master.balancer.FavoredNodeAssignmentHelper;
 import org.apache.hadoop.hbase.master.balancer.FavoredNodeLoadBalancer;
@@ -73,6 +72,7 @@ public class TestRegionPlacement {
   final static Log LOG = LogFactory.getLog(TestRegionPlacement.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final static int SLAVES = 10;
+  private static Connection CONNECTION;
   private static Admin admin;
   private static RegionPlacementMaintainer rp;
   private static Position[] positions = Position.values();
@@ -89,7 +89,8 @@ public class TestRegionPlacement {
         FavoredNodeLoadBalancer.class, LoadBalancer.class);
     conf.setBoolean("hbase.tests.use.shortcircuit.reads", false);
     TEST_UTIL.startMiniCluster(SLAVES);
-    admin = new HBaseAdmin(conf);
+    CONNECTION = TEST_UTIL.getConnection();
+    admin = CONNECTION.getAdmin();
     rp = new RegionPlacementMaintainer(conf);
   }
 
@@ -466,11 +467,11 @@ public class TestRegionPlacement {
     final AtomicInteger regionOnPrimaryNum = new AtomicInteger(0);
     final AtomicInteger totalRegionNum = new AtomicInteger(0);
     LOG.info("The start of region placement verification");
-    MetaScannerVisitor visitor = new MetaScannerVisitor() {
-      public boolean processRow(Result result) throws IOException {
+    MetaTableAccessor.Visitor visitor = new MetaTableAccessor.Visitor() {
+      public boolean visit(Result result) throws IOException {
         try {
           @SuppressWarnings("deprecation")
-          HRegionInfo info = MetaScanner.getHRegionInfo(result);
+          HRegionInfo info = MetaTableAccessor.getHRegionInfo(result);
           if(info.getTable().getNamespaceAsString()
               .equals(NamespaceDescriptor.SYSTEM_NAMESPACE_NAME_STR)) {
             return true;
@@ -518,11 +519,8 @@ public class TestRegionPlacement {
           throw e;
         }
       }
-
-      @Override
-      public void close() throws IOException {}
     };
-    MetaScanner.metaScan(TEST_UTIL.getConfiguration(), visitor);
+    MetaTableAccessor.fullScanRegions(CONNECTION, visitor);
     LOG.info("There are " + regionOnPrimaryNum.intValue() + " out of " +
         totalRegionNum.intValue() + " regions running on the primary" +
         " region servers" );
@@ -549,8 +547,7 @@ public class TestRegionPlacement {
     desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
     admin.createTable(desc, splitKeys);
 
-    @SuppressWarnings("deprecation")
-    HTable ht = new HTable(TEST_UTIL.getConfiguration(), tableName);
+    HTable ht = (HTable) CONNECTION.getTable(tableName);
     @SuppressWarnings("deprecation")
     Map<HRegionInfo, ServerName> regions = ht.getRegionLocations();
     assertEquals("Tried to create " + expectedRegions + " regions "

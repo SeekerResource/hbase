@@ -22,6 +22,8 @@ package org.apache.hadoop.hbase.master;
 import java.io.IOException;
 import java.util.List;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -48,6 +50,8 @@ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.Quotas;
 public class MasterCoprocessorHost
     extends CoprocessorHost<MasterCoprocessorHost.MasterEnvironment> {
 
+  private static final Log LOG = LogFactory.getLog(MasterCoprocessorHost.class);
+
   /**
    * Coprocessor environment extension providing access to master related
    * services.
@@ -70,10 +74,16 @@ public class MasterCoprocessorHost
 
   private MasterServices masterServices;
 
-  MasterCoprocessorHost(final MasterServices services, final Configuration conf) {
+  public MasterCoprocessorHost(final MasterServices services, final Configuration conf) {
     super(services);
     this.conf = conf;
     this.masterServices = services;
+    // Log the state of coprocessor loading here; should appear only once or
+    // twice in the daemon log, depending on HBase version, because there is
+    // only one MasterCoprocessorHost instance in the master process
+    boolean coprocessorsEnabled = conf.getBoolean(COPROCESSORS_ENABLED_CONF_KEY,
+      DEFAULT_COPROCESSORS_ENABLED);
+    LOG.info("System coprocessor loading is " + (coprocessorsEnabled ? "enabled" : "disabled"));
     loadSystemCoprocessors(conf, MASTER_COPROCESSOR_CONF_KEY);
   }
 
@@ -146,6 +156,50 @@ public class MasterCoprocessorHost
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
         oserver.postModifyNamespace(ctx, ns);
+      }
+    });
+  }
+
+  public void preGetNamespaceDescriptor(final String namespaceName)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      @Override
+      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
+          throws IOException {
+        oserver.preGetNamespaceDescriptor(ctx, namespaceName);
+      }
+    });
+  }
+
+  public void postGetNamespaceDescriptor(final NamespaceDescriptor ns)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      @Override
+      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
+          throws IOException {
+        oserver.postGetNamespaceDescriptor(ctx, ns);
+      }
+    });
+  }
+
+  public boolean preListNamespaceDescriptors(final List<NamespaceDescriptor> descriptors)
+      throws IOException {
+    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      @Override
+      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
+          throws IOException {
+        oserver.preListNamespaceDescriptors(ctx, descriptors);
+      }
+    });
+  }
+
+  public void postListNamespaceDescriptors(final List<NamespaceDescriptor> descriptors)
+      throws IOException {
+    execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      @Override
+      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
+          throws IOException {
+        oserver.postListNamespaceDescriptors(ctx, descriptors);
       }
     });
   }
@@ -812,17 +866,6 @@ public class MasterCoprocessorHost
   }
 
   public boolean preGetTableDescriptors(final List<TableName> tableNamesList,
-    final List<HTableDescriptor> descriptors) throws IOException {
-    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
-      @Override
-      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
-          throws IOException {
-        oserver.preGetTableDescriptors(ctx, tableNamesList, descriptors);
-      }
-    });
-  }
-
-  public boolean preGetTableDescriptors(final List<TableName> tableNamesList,
       final List<HTableDescriptor> descriptors, final String regex) throws IOException {
     return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
       @Override
@@ -833,24 +876,35 @@ public class MasterCoprocessorHost
     });
   }
 
-  public void postGetTableDescriptors(final List<HTableDescriptor> descriptors)
-      throws IOException {
+  public void postGetTableDescriptors(final List<TableName> tableNamesList,
+      final List<HTableDescriptor> descriptors, final String regex) throws IOException {
     execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
-        oserver.postGetTableDescriptors(ctx, descriptors);
+        oserver.postGetTableDescriptors(ctx, tableNamesList, descriptors, regex);
       }
     });
   }
 
-  public void postGetTableDescriptors(final List<HTableDescriptor> descriptors, final String regex)
-      throws IOException {
+  public boolean preGetTableNames(final List<HTableDescriptor> descriptors,
+      final String regex) throws IOException {
+    return execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
+      @Override
+      public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
+          throws IOException {
+        oserver.preGetTableNames(ctx, descriptors, regex);
+      }
+    });
+  }
+
+  public void postGetTableNames(final List<HTableDescriptor> descriptors,
+      final String regex) throws IOException {
     execOperation(coprocessors.isEmpty() ? null : new CoprocessorOperation() {
       @Override
       public void call(MasterObserver oserver, ObserverContext<MasterCoprocessorEnvironment> ctx)
           throws IOException {
-        oserver.postGetTableDescriptors(ctx, descriptors, regex);
+        oserver.postGetTableNames(ctx, descriptors, regex);
       }
     });
   }

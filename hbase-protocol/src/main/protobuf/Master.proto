@@ -315,6 +315,8 @@ message GetSchemaAlterStatusResponse {
 message GetTableDescriptorsRequest {
   repeated TableName table_names = 1;
   optional string regex = 2;
+  optional bool include_sys_tables = 3 [default=false];
+  optional string namespace = 4;
 }
 
 message GetTableDescriptorsResponse {
@@ -322,6 +324,9 @@ message GetTableDescriptorsResponse {
 }
 
 message GetTableNamesRequest {
+  optional string regex = 1;
+  optional bool include_sys_tables = 2 [default=false];
+  optional string namespace = 3;
 }
 
 message GetTableNamesResponse {
@@ -380,6 +385,18 @@ message SetQuotaRequest {
 }
 
 message SetQuotaResponse {
+}
+
+message MajorCompactionTimestampRequest {
+  required TableName table_name = 1;
+}
+
+message MajorCompactionTimestampForRegionRequest {
+  required RegionSpecifier region = 1;
+}
+
+message MajorCompactionTimestampResponse {
+  required int64 compaction_timestamp = 1;
 }
 
 service MasterService {
@@ -596,4 +613,12 @@ service MasterService {
 
   /** Apply the new quota settings */
   rpc SetQuota(SetQuotaRequest) returns(SetQuotaResponse);
+
+  /** Returns the timestamp of the last major compaction */
+  rpc getLastMajorCompactionTimestamp(MajorCompactionTimestampRequest)
+    returns(MajorCompactionTimestampResponse);
+
+  /** Returns the timestamp of the last major compaction */
+  rpc getLastMajorCompactionTimestampForRegion(MajorCompactionTimestampForRegionRequest)
+    returns(MajorCompactionTimestampResponse);
 }

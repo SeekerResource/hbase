@@ -31,8 +31,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.regionserver.HRegion;
@@ -114,14 +112,15 @@ public class TestMergeTable {
       LOG.info("Starting mini hbase cluster");
       UTIL.startMiniHBaseCluster(1, 1);
       Configuration c = new Configuration(UTIL.getConfiguration());
-      Connection connection = HConnectionManager.getConnection(c);
+      Connection connection = UTIL.getConnection();
 
       List<HRegionInfo> originalTableRegions =
         MetaTableAccessor.getTableRegions(connection, desc.getTableName());
       LOG.info("originalTableRegions size=" + originalTableRegions.size() +
         "; " + originalTableRegions);
-      Admin admin = new HBaseAdmin(c);
+      Admin admin = connection.getAdmin();
       admin.disableTable(desc.getTableName());
+      admin.close();
       HMerge.merge(c, FileSystem.get(c), desc.getTableName());
       List<HRegionInfo> postMergeTableRegions =
         MetaTableAccessor.getTableRegions(connection, desc.getTableName());
@@ -141,7 +140,8 @@ public class TestMergeTable {
       byte [] startKey, byte [] endKey, int firstRow, int nrows, Path rootdir)
   throws IOException {
     HRegionInfo hri = new HRegionInfo(desc.getTableName(), startKey, endKey);
-    HRegion region = HRegion.createHRegion(hri, rootdir, UTIL.getConfiguration(), desc);
+    HRegion region = HBaseTestingUtility.createRegionAndWAL(hri, rootdir, UTIL.getConfiguration(),
+        desc);
     LOG.info("Created region " + region.getRegionNameAsString());
     for(int i = firstRow; i < firstRow + nrows; i++) {
       Put put = new Put(Bytes.toBytes("row_" + String.format("%1$05d", i)));
@@ -153,19 +153,19 @@ public class TestMergeTable {
         region.flushcache();
       }
     }
-    HRegion.closeHRegion(region);
+    HBaseTestingUtility.closeRegionAndWAL(region);
     return region;
   }
 
   protected void setupMeta(Path rootdir, final HRegion [] regions)
   throws IOException {
     HRegion meta =
-      HRegion.createHRegion(HRegionInfo.FIRST_META_REGIONINFO, rootdir,
-      UTIL.getConfiguration(), UTIL.getMetaTableDescriptor());
+      HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO, rootdir,
+          UTIL.getConfiguration(), UTIL.getMetaTableDescriptor());
     for (HRegion r: regions) {
       HRegion.addRegionToMETA(meta, r);
     }
-    HRegion.closeHRegion(meta);
+    HBaseTestingUtility.closeRegionAndWAL(meta);
   }
 
 }

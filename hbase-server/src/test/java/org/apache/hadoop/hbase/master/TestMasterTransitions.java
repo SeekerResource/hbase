@@ -22,16 +22,17 @@ import java.io.IOException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -64,9 +65,12 @@ public class TestMasterTransitions {
     TEST_UTIL.getConfiguration().setBoolean("dfs.support.append", true);
     TEST_UTIL.startMiniCluster(2);
     // Create a table of three families.  This will assign a region.
-    TEST_UTIL.createTable(TABLENAME, FAMILIES);
-    HTable t = new HTable(TEST_UTIL.getConfiguration(), TABLENAME);
-    int countOfRegions = TEST_UTIL.createMultiRegions(t, getTestFamily());
+    TEST_UTIL.createMultiRegionTable(TABLENAME, FAMILIES);
+    HTable t = (HTable) TEST_UTIL.getConnection().getTable(TABLENAME);
+    int countOfRegions = -1;
+    try (RegionLocator r = t.getRegionLocator()) {
+      countOfRegions = r.getStartKeys().length;
+    }
     TEST_UTIL.waitUntilAllRegionsAssigned(TABLENAME);
     addToEachStartKey(countOfRegions);
     t.close();
@@ -480,9 +484,8 @@ public class TestMasterTransitions {
    * @throws IOException
    */
   private static int addToEachStartKey(final int expected) throws IOException {
-    Table t = new HTable(TEST_UTIL.getConfiguration(), TABLENAME);
-    Table meta = new HTable(TEST_UTIL.getConfiguration(),
-        TableName.META_TABLE_NAME);
+    Table t = TEST_UTIL.getConnection().getTable(TABLENAME);
+    Table meta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
     int rows = 0;
     Scan scan = new Scan();
     scan.addColumn(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER);

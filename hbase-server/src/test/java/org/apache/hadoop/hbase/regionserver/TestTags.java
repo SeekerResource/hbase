@@ -119,7 +119,7 @@ public class TestTags {
       Admin admin = TEST_UTIL.getHBaseAdmin();
       admin.createTable(desc);
       byte[] value = Bytes.toBytes("value");
-      table = new HTable(TEST_UTIL.getConfiguration(), tableName);
+      table = TEST_UTIL.getConnection().getTable(tableName);
       Put put = new Put(row);
       put.add(fam, qual, HConstants.LATEST_TIMESTAMP, value);
       put.setAttribute("visibility", Bytes.toBytes("myTag"));
@@ -185,7 +185,7 @@ public class TestTags {
       Admin admin = TEST_UTIL.getHBaseAdmin();
       admin.createTable(desc);
 
-      table = new HTable(TEST_UTIL.getConfiguration(), tableName);
+      table = TEST_UTIL.getConnection().getTable(tableName);
       Put put = new Put(row);
       byte[] value = Bytes.toBytes("value");
       put.add(fam, qual, HConstants.LATEST_TIMESTAMP, value);
@@ -275,7 +275,7 @@ public class TestTags {
       Admin admin = TEST_UTIL.getHBaseAdmin();
       admin.createTable(desc);
       try {
-        table = new HTable(TEST_UTIL.getConfiguration(), tableName);
+        table = TEST_UTIL.getConnection().getTable(tableName);
         Put put = new Put(row);
         byte[] value = Bytes.toBytes("value");
         put.add(fam, qual, HConstants.LATEST_TIMESTAMP, value);
@@ -287,11 +287,11 @@ public class TestTags {
         put1.add(fam, qual, HConstants.LATEST_TIMESTAMP, value1);
         table.put(put1);
         admin.flush(tableName);
-	// We are lacking an API for confirming flush request compaction.
-	// Just sleep for a short time. We won't be able to confirm flush
-	// completion but the test won't hang now or in the future if
-	// default compaction policy causes compaction between flush and
-	// when we go to confirm it.
+        // We are lacking an API for confirming flush request compaction.
+        // Just sleep for a short time. We won't be able to confirm flush
+        // completion but the test won't hang now or in the future if
+        // default compaction policy causes compaction between flush and
+        // when we go to confirm it.
         Thread.sleep(1000);
 
         put1 = new Put(row2);
@@ -388,7 +388,7 @@ public class TestTags {
 
     Table table = null;
     try {
-      table = new HTable(TEST_UTIL.getConfiguration(), tableName);
+      table = TEST_UTIL.getConnection().getTable(tableName);
       Put put = new Put(row1);
       byte[] v = Bytes.toBytes(2L);
       put.add(f, q, v);
@@ -419,8 +419,13 @@ public class TestTags {
       tags = TestCoprocessorForTags.tags;
       assertEquals(5L, Bytes.toLong(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength()));
       assertEquals(2, tags.size());
-      assertEquals("tag1", Bytes.toString(tags.get(0).getValue()));
-      assertEquals("tag2", Bytes.toString(tags.get(1).getValue()));
+      // We cannot assume the ordering of tags
+      List<String> tagValues = new ArrayList<String>();
+      for (Tag tag: tags) {
+        tagValues.add(Bytes.toString(tag.getValue()));
+      }
+      assertTrue(tagValues.contains("tag1"));
+      assertTrue(tagValues.contains("tag2"));
       TestCoprocessorForTags.checkTagPresence = false;
       TestCoprocessorForTags.tags = null;
 
@@ -476,8 +481,13 @@ public class TestTags {
       kv = KeyValueUtil.ensureKeyValue(result.getColumnLatestCell(f, q));
       tags = TestCoprocessorForTags.tags;
       assertEquals(2, tags.size());
-      assertEquals("tag1", Bytes.toString(tags.get(0).getValue()));
-      assertEquals("tag2", Bytes.toString(tags.get(1).getValue()));
+      // We cannot assume the ordering of tags
+      tagValues.clear();
+      for (Tag tag: tags) {
+        tagValues.add(Bytes.toString(tag.getValue()));
+      }
+      assertTrue(tagValues.contains("tag1"));
+      assertTrue(tagValues.contains("tag2"));
       TestCoprocessorForTags.checkTagPresence = false;
       TestCoprocessorForTags.tags = null;
 

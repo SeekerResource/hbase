@@ -45,7 +45,6 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.coprocessor.Batch;
@@ -72,7 +71,7 @@ public class TestCoprocessorEndpoint {
   private static final Log LOG = LogFactory.getLog(TestCoprocessorEndpoint.class);
 
   private static final TableName TEST_TABLE =
-      TableName.valueOf("TestTable");
+      TableName.valueOf("TestCoprocessorEndpoint");
   private static final byte[] TEST_FAMILY = Bytes.toBytes("TestFamily");
   private static final byte[] TEST_QUALIFIER = Bytes.toBytes("TestQualifier");
   private static byte[] ROW = Bytes.toBytes("testRow");
@@ -94,17 +93,16 @@ public class TestCoprocessorEndpoint {
     conf.setStrings(CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY,
         ProtobufCoprocessorService.class.getName());
     util.startMiniCluster(2);
-    Admin admin = new HBaseAdmin(conf);
+    Admin admin = util.getHBaseAdmin();
     HTableDescriptor desc = new HTableDescriptor(TEST_TABLE);
     desc.addFamily(new HColumnDescriptor(TEST_FAMILY));
     admin.createTable(desc, new byte[][]{ROWS[rowSeperator1], ROWS[rowSeperator2]});
     util.waitUntilAllRegionsAssigned(TEST_TABLE);
-    admin.close();
 
-    Table table = new HTable(conf, TEST_TABLE);
+    Table table = util.getConnection().getTable(TEST_TABLE);
     for (int i = 0; i < ROWSIZE; i++) {
       Put put = new Put(ROWS[i]);
-      put.add(TEST_FAMILY, TEST_QUALIFIER, Bytes.toBytes(i));
+      put.addColumn(TEST_FAMILY, TEST_QUALIFIER, Bytes.toBytes(i));
       table.put(put);
     }
     table.close();
@@ -140,7 +138,7 @@ public class TestCoprocessorEndpoint {
 
   @Test
   public void testAggregation() throws Throwable {
-    Table table = new HTable(util.getConfiguration(), TEST_TABLE);
+    Table table = util.getConnection().getTable(TEST_TABLE);
     Map<byte[], Long> results = sum(table, TEST_FAMILY, TEST_QUALIFIER,
       ROWS[0], ROWS[ROWS.length-1]);
     int sumResult = 0;
@@ -174,7 +172,7 @@ public class TestCoprocessorEndpoint {
 
   @Test
   public void testCoprocessorService() throws Throwable {
-    HTable table = new HTable(util.getConfiguration(), TEST_TABLE);
+    HTable table = (HTable) util.getConnection().getTable(TEST_TABLE);
     NavigableMap<HRegionInfo,ServerName> regions = table.getRegionLocations();
 
     final TestProtos.EchoRequestProto request =
@@ -248,7 +246,7 @@ public class TestCoprocessorEndpoint {
 
   @Test
   public void testCoprocessorServiceNullResponse() throws Throwable {
-    HTable table = new HTable(util.getConfiguration(), TEST_TABLE);
+    HTable table = (HTable) util.getConnection().getTable(TEST_TABLE);
     NavigableMap<HRegionInfo,ServerName> regions = table.getRegionLocations();
 
     final TestProtos.EchoRequestProto request =
@@ -299,7 +297,7 @@ public class TestCoprocessorEndpoint {
     Configuration configuration = new Configuration(util.getConfiguration());
     // Make it not retry forever
     configuration.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 1);
-    Table table = new HTable(configuration, TEST_TABLE);
+    Table table = util.getConnection().getTable(TEST_TABLE);
 
     try {
       CoprocessorRpcChannel protocol = table.coprocessorService(ROWS[0]);

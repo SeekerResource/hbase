@@ -35,11 +35,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
@@ -127,7 +127,7 @@ public class TestZooKeeper {
     }
   }
 
-  private ZooKeeperWatcher getZooKeeperWatcher(HConnection c)
+  private ZooKeeperWatcher getZooKeeperWatcher(Connection c)
   throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
     Method getterZK = c.getClass().getDeclaredMethod("getKeepAliveZooKeeperWatcher");
     getterZK.setAccessible(true);
@@ -148,7 +148,7 @@ public class TestZooKeeper {
     // We don't want to share the connection as we will check its state
     c.set(HConstants.HBASE_CLIENT_INSTANCE_ID, "1111");
 
-    HConnection connection = HConnectionManager.getConnection(c);
+    Connection connection = ConnectionFactory.createConnection(c);
 
     ZooKeeperWatcher connectionZK = getZooKeeperWatcher(connection);
     LOG.info("ZooKeeperWatcher= 0x"+ Integer.toHexString(
@@ -253,15 +253,14 @@ public class TestZooKeeper {
     HColumnDescriptor family = new HColumnDescriptor("fam");
     desc.addFamily(family);
     LOG.info("Creating table " + tableName);
-    Admin admin = new HBaseAdmin(TEST_UTIL.getConfiguration());
+    Admin admin = TEST_UTIL.getHBaseAdmin();
     try {
       admin.createTable(desc);
     } finally {
       admin.close();
     }
 
-    Table table =
-      new HTable(new Configuration(TEST_UTIL.getConfiguration()), desc.getTableName());
+    Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
     Put put = new Put(Bytes.toBytes("testrow"));
     put.add(Bytes.toBytes("fam"),
         Bytes.toBytes("col"), Bytes.toBytes("testdata"));
@@ -273,11 +272,11 @@ public class TestZooKeeper {
   @Test
   public void testMultipleZK()
   throws IOException, NoSuchMethodException, InvocationTargetException, IllegalAccessException {
-    Table localMeta =
-      new HTable(new Configuration(TEST_UTIL.getConfiguration()), TableName.META_TABLE_NAME);
+    Table localMeta = TEST_UTIL.getConnection().getTable(TableName.META_TABLE_NAME);
     Configuration otherConf = new Configuration(TEST_UTIL.getConfiguration());
     otherConf.set(HConstants.ZOOKEEPER_QUORUM, "127.0.0.1");
-    Table ipMeta = new HTable(otherConf, TableName.META_TABLE_NAME);
+    Connection connection = ConnectionFactory.createConnection(otherConf);
+    Table ipMeta = connection.getTable(TableName.META_TABLE_NAME);
 
     // dummy, just to open the connection
     final byte [] row = new byte [] {'r'};
@@ -294,6 +293,7 @@ public class TestZooKeeper {
 
     localMeta.close();
     ipMeta.close();
+    connection.close();
   }
 
   /**
@@ -347,8 +347,8 @@ public class TestZooKeeper {
 
   @Test
   public void testClusterKey() throws Exception {
-    testKey("server", "2181", "hbase");
-    testKey("server1,server2,server3", "2181", "hbase");
+    testKey("server", 2181, "hbase");
+    testKey("server1,server2,server3", 2181, "hbase");
     try {
       ZKUtil.transformClusterKey("2181:hbase");
     } catch (IOException ex) {
@@ -356,20 +356,58 @@ public class TestZooKeeper {
     }
   }
 
-  private void testKey(String ensemble, String port, String znode)
+  @Test
+  public void testClusterKeyWithMultiplePorts() throws Exception {
+    // server has different port than the default port
+    testKey("server1:2182", 2181, "hbase", true);
+    // multiple servers have their own port
+    testKey("server1:2182,server2:2183,server3:2184", 2181, "hbase", true);
+    // one server has no specified port, should use default port
+    testKey("server1:2182,server2,server3:2184", 2181, "hbase", true);
+    // the last server has no specified port, should use default port
+    testKey("server1:2182,server2:2183,server3", 2181, "hbase", true);
+    // multiple servers have no specified port, should use default port for those servers
+    testKey("server1:2182,server2,server3:2184,server4", 2181, "hbase", true);
+    // same server, different ports
+    testKey("server1:2182,server1:2183,server1", 2181, "hbase", true);
+    // mix of same server/different port and different server
+    testKey("server1:2182,server2:2183,server1", 2181, "hbase", true);
+  }
+
+  private void testKey(String ensemble, int port, String znode)
+      throws IOException {
+    testKey(ensemble, port, znode, false); // not support multiple client ports
+  }
+
+  private void testKey(String ensemble, int port, String znode, Boolean multiplePortSupport)
       throws IOException {
     Configuration conf = new Configuration();
     String key = ensemble+":"+port+":"+znode;
-    String[] parts = ZKUtil.transformClusterKey(key);
-    assertEquals(ensemble, parts[0]);
-    assertEquals(port, parts[1]);
-    assertEquals(znode, parts[2]);
+    String ensemble2 = null;
+    ZKUtil.ZKClusterKey zkClusterKey = ZKUtil.transformClusterKey(key);
+    if (multiplePortSupport) {
+      ensemble2 = ZKUtil.standardizeQuorumServerString(ensemble, Integer.toString(port));
+      assertEquals(ensemble2, zkClusterKey.quorumString);
+    }
+    else {
+      assertEquals(ensemble, zkClusterKey.quorumString);
+    }
+    assertEquals(port, zkClusterKey.clientPort);
+    assertEquals(znode, zkClusterKey.znodeParent);
+
     ZKUtil.applyClusterKeyToConf(conf, key);
-    assertEquals(parts[0], conf.get(HConstants.ZOOKEEPER_QUORUM));
-    assertEquals(parts[1], conf.get(HConstants.ZOOKEEPER_CLIENT_PORT));
-    assertEquals(parts[2], conf.get(HConstants.ZOOKEEPER_ZNODE_PARENT));
+    assertEquals(zkClusterKey.quorumString, conf.get(HConstants.ZOOKEEPER_QUORUM));
+    assertEquals(zkClusterKey.clientPort, conf.getInt(HConstants.ZOOKEEPER_CLIENT_PORT, -1));
+    assertEquals(zkClusterKey.znodeParent, conf.get(HConstants.ZOOKEEPER_ZNODE_PARENT));
+
     String reconstructedKey = ZKUtil.getZooKeeperClusterKey(conf);
-    assertEquals(key, reconstructedKey);
+    if (multiplePortSupport) {
+      String key2 = ensemble2 + ":" + port + ":" + znode;
+      assertEquals(key2, reconstructedKey);
+    }
+    else {
+      assertEquals(key, reconstructedKey);
+    }
   }
 
   /**
@@ -494,7 +532,7 @@ public class TestZooKeeper {
     ZooKeeperWatcher zkw = m.getZooKeeper();
     int expectedNumOfListeners = zkw.getNumberOfListeners();
     // now the cluster is up. So assign some regions.
-    Admin admin = new HBaseAdmin(TEST_UTIL.getConfiguration());
+    Admin admin = TEST_UTIL.getHBaseAdmin();
     try {
       byte[][] SPLIT_KEYS = new byte[][] { Bytes.toBytes("a"), Bytes.toBytes("b"),
         Bytes.toBytes("c"), Bytes.toBytes("d"), Bytes.toBytes("e"), Bytes.toBytes("f"),
@@ -531,7 +569,7 @@ public class TestZooKeeper {
     cluster.startRegionServer();
     HMaster m = cluster.getMaster();
     // now the cluster is up. So assign some regions.
-    Admin admin = new HBaseAdmin(TEST_UTIL.getConfiguration());
+    Admin admin = TEST_UTIL.getHBaseAdmin();
     Table table = null;
     try {
       byte[][] SPLIT_KEYS = new byte[][] { Bytes.toBytes("1"), Bytes.toBytes("2"),
@@ -543,7 +581,7 @@ public class TestZooKeeper {
       htd.addFamily(hcd);
       admin.createTable(htd, SPLIT_KEYS);
       TEST_UTIL.waitUntilNoRegionsInTransition(60000);
-      table = new HTable(TEST_UTIL.getConfiguration(), htd.getTableName());
+      table = TEST_UTIL.getConnection().getTable(htd.getTableName());
       Put p;
       int numberOfPuts;
       for (numberOfPuts = 0; numberOfPuts < 6; numberOfPuts++) {
