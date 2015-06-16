@@ -47,7 +47,6 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.hfile.HFilePrettyPrinter;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScannerImpl;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -76,7 +75,7 @@ public class TestScanWithBloomError {
   private static final String QUALIFIER_PREFIX = "qual";
   private static final byte[] ROW_BYTES = Bytes.toBytes(ROW);
   private static NavigableSet<Integer> allColIds = new TreeSet<Integer>();
-  private HRegion region;
+  private Region region;
   private BloomType bloomType;
   private FileSystem fs;
   private Configuration conf;
@@ -165,7 +164,7 @@ public class TestScanWithBloomError {
 
     { // Limit the scope of results.
       List<Cell> results = new ArrayList<Cell>();
-      while (NextState.hasMoreValues(scanner.next(results)) || results.size() > 0) {
+      while (scanner.next(results) || results.size() > 0) {
         allResults.addAll(results);
         results.clear();
       }
@@ -210,7 +209,7 @@ public class TestScanWithBloomError {
       p.add(kv);
     }
     region.put(p);
-    region.flushcache();
+    region.flush(true);
   }
 
 

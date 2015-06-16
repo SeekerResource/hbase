@@ -50,6 +50,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.ConnectionClosingException;
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AuthenticationProtos;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos;
 import org.apache.hadoop.hbase.protobuf.generated.TracingProtos;
@@ -79,7 +80,7 @@ import com.google.protobuf.RpcCallback;
  */
 @InterfaceAudience.Private
 public class AsyncRpcChannel {
-  public static final Log LOG = LogFactory.getLog(AsyncRpcChannel.class.getName());
+  private static final Log LOG = LogFactory.getLog(AsyncRpcChannel.class.getName());
 
   private static final int MAX_SASL_RETRIES = 5;
 
@@ -262,7 +263,7 @@ public class AsyncRpcChannel {
               handleSaslConnectionFailure(retryCount, cause, realTicket);
 
               // Try to reconnect
-              AsyncRpcClient.WHEEL_TIMER.newTimeout(new TimerTask() {
+              client.newTimeout(new TimerTask() {
                 @Override
                 public void run(Timeout timeout) throws Exception {
                   connect(bootstrap);
@@ -289,7 +290,7 @@ public class AsyncRpcChannel {
    */
   private void retryOrClose(final Bootstrap bootstrap, int connectCounter, Throwable e) {
     if (connectCounter < client.maxRetries) {
-      AsyncRpcClient.WHEEL_TIMER.newTimeout(new TimerTask() {
+      client.newTimeout(new TimerTask() {
         @Override public void run(Timeout timeout) throws Exception {
           connect(bootstrap);
         }
@@ -339,7 +340,7 @@ public class AsyncRpcChannel {
       // Add timeout for cleanup if none is present
       if (cleanupTimer == null && call.getRpcTimeout() > 0) {
         cleanupTimer =
-            AsyncRpcClient.WHEEL_TIMER.newTimeout(timeoutTask, call.getRpcTimeout(),
+            client.newTimeout(timeoutTask, call.getRpcTimeout(),
               TimeUnit.MILLISECONDS);
       }
       if (!connected) {
@@ -379,6 +380,7 @@ public class AsyncRpcChannel {
       headerBuilder.setCellBlockCompressorClass(client.compressor.getClass().getCanonicalName());
     }
 
+    headerBuilder.setVersionInfo(ProtobufUtil.getVersionInfo());
     RPCProtos.ConnectionHeader header = headerBuilder.build();
 
 
@@ -601,7 +603,7 @@ public class AsyncRpcChannel {
       }
       if (nextCleanupTaskDelay > 0) {
         cleanupTimer =
-            AsyncRpcClient.WHEEL_TIMER.newTimeout(timeoutTask, nextCleanupTaskDelay,
+            client.newTimeout(timeoutTask, nextCleanupTaskDelay,
               TimeUnit.MILLISECONDS);
       } else {
         cleanupTimer = null;

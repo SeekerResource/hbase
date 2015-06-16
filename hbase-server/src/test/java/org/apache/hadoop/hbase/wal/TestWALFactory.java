@@ -58,7 +58,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.protocol.FSConstants;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -81,7 +81,7 @@ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
  */
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestWALFactory {
-  protected static final Log LOG = LogFactory.getLog(TestWALFactory.class);
+  private static final Log LOG = LogFactory.getLog(TestWALFactory.class);
 
   protected static Configuration conf;
   private static MiniDFSCluster cluster;
@@ -245,7 +245,7 @@ public class TestWALFactory {
     try {
       HRegionInfo info = new HRegionInfo(tableName,
                   null,null, false);
-      HTableDescriptor htd = new HTableDescriptor();
+      HTableDescriptor htd = new HTableDescriptor(tableName);
       htd.addFamily(new HColumnDescriptor(tableName.getName()));
       final WAL wal = wals.getWAL(info.getEncodedNameAsBytes());
 
@@ -366,7 +366,7 @@ public class TestWALFactory {
     final AtomicLong sequenceId = new AtomicLong(1);
     final int total = 20;
 
-    HTableDescriptor htd = new HTableDescriptor();
+    HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(new HColumnDescriptor(tableName.getName()));
 
     for (int i = 0; i < total; i++) {
@@ -384,7 +384,7 @@ public class TestWALFactory {
     // Stop the cluster.  (ensure restart since we're sharing MiniDFSCluster)
     try {
       DistributedFileSystem dfs = (DistributedFileSystem) cluster.getFileSystem();
-      dfs.setSafeMode(FSConstants.SafeModeAction.SAFEMODE_ENTER);
+      dfs.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_ENTER);
       TEST_UTIL.shutdownMiniDFSCluster();
       try {
         // wal.writer.close() will throw an exception,
@@ -599,7 +599,7 @@ public class TestWALFactory {
     final DumbWALActionsListener visitor = new DumbWALActionsListener();
     final AtomicLong sequenceId = new AtomicLong(1);
     long timestamp = System.currentTimeMillis();
-    HTableDescriptor htd = new HTableDescriptor();
+    HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(new HColumnDescriptor("column"));
 
     HRegionInfo hri = new HRegionInfo(tableName,

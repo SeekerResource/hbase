@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.hbase;
 
+import static org.apache.hadoop.hbase.HConstants.EMPTY_BYTE_ARRAY;
+
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -379,8 +381,10 @@ public final class CellUtil {
   }
 
   public static boolean matchingRow(final Cell left, final byte[] buf) {
-    return Bytes.equals(left.getRowArray(), left.getRowOffset(), left.getRowLength(), buf, 0,
-        buf.length);
+    if (buf == null) {
+      return left.getQualifierLength() == 0;
+    }
+    return matchingRow(left, buf, 0, buf.length);
   }
 
   public static boolean matchingRow(final Cell left, final byte[] buf, final int offset,
@@ -395,8 +399,10 @@ public final class CellUtil {
   }
 
   public static boolean matchingFamily(final Cell left, final byte[] buf) {
-    return Bytes.equals(left.getFamilyArray(), left.getFamilyOffset(), left.getFamilyLength(), buf,
-        0, buf.length);
+    if (buf == null) {
+      return left.getFamilyLength() == 0;
+    }
+    return matchingFamily(left, buf, 0, buf.length);
   }
 
   public static boolean matchingFamily(final Cell left, final byte[] buf, final int offset,
@@ -411,14 +417,29 @@ public final class CellUtil {
         right.getQualifierLength());
   }
 
+  /**
+   * Finds if the qualifier part of the cell and the KV serialized
+   * byte[] are equal
+   * @param left
+   * @param buf the serialized keyvalue format byte[]
+   * @return true if the qualifier matches, false otherwise
+   */
   public static boolean matchingQualifier(final Cell left, final byte[] buf) {
     if (buf == null) {
       return left.getQualifierLength() == 0;
     }
-    return Bytes.equals(left.getQualifierArray(), left.getQualifierOffset(),
-        left.getQualifierLength(), buf, 0, buf.length);
+    return matchingQualifier(left, buf, 0, buf.length);
   }
 
+  /**
+   * Finds if the qualifier part of the cell and the KV serialized
+   * byte[] are equal
+   * @param left
+   * @param buf the serialized keyvalue format byte[]
+   * @param offset the offset of the qualifier in the byte[]
+   * @param length the length of the qualifier in the byte[]
+   * @return true if the qualifier matches, false otherwise
+   */
   public static boolean matchingQualifier(final Cell left, final byte[] buf, final int offset,
       final int length) {
     if (buf == null) {
@@ -566,6 +587,21 @@ public final class CellUtil {
     }
     // TODO: Add sizing of references that hold the row, family, etc., arrays.
     return estimatedSerializedSizeOf(cell);
+  }
+
+  /**
+   * This is a hack that should be removed once we don't care about matching
+   * up client- and server-side estimations of cell size. It needed to be
+   * backwards compatible with estimations done by older clients. We need to
+   * pretend that tags never exist and cells aren't serialized with tag
+   * length included. See HBASE-13262 and HBASE-13303
+   */
+  @Deprecated
+  public static long estimatedHeapSizeOfWithoutTags(final Cell cell) {
+    if (cell instanceof KeyValue) {
+      return ((KeyValue)cell).heapSizeWithoutTags();
+    }
+    return getSumOfCellKeyElementLengths(cell) + cell.getValueLength();
   }
 
   /********************* tags *************************************/
@@ -735,8 +771,10 @@ public final class CellUtil {
     sb.append(KeyValue.humanReadableTimestamp(cell.getTimestamp()));
     sb.append('/');
     sb.append(Type.codeToType(cell.getTypeByte()));
-    sb.append("/vlen=");
-    sb.append(cell.getValueLength());
+    if (!(cell instanceof KeyValue.KeyOnlyKeyValue)) {
+      sb.append("/vlen=");
+      sb.append(cell.getValueLength());
+    }
     sb.append("/seqid=");
     sb.append(cell.getSequenceId());
     return sb.toString();
@@ -886,5 +924,281 @@ public final class CellUtil {
     }
 
     return builder.toString();
+  }
+
+  /***************** special cases ****************************/
+
+  /**
+   * special case for Cell.equals
+   */
+  public static boolean equalsIgnoreMvccVersion(Cell a, Cell b) {
+    // row
+    boolean res = matchingRow(a, b);
+    if (!res)
+      return res;
+
+    // family
+    res = matchingColumn(a, b);
+    if (!res)
+      return res;
+
+    // timestamp: later sorts first
+    if (!matchingTimestamp(a, b))
+      return false;
+
+    // type
+    int c = (0xff & b.getTypeByte()) - (0xff & a.getTypeByte());
+    if (c != 0)
+      return false;
+    else return true;
+  }
+
+  /**************** equals ****************************/
+
+  public static boolean equals(Cell a, Cell b) {
+    return matchingRow(a, b) && matchingFamily(a, b) && matchingQualifier(a, b)
+        && matchingTimestamp(a, b) && matchingType(a, b);
+  }
+
+  public static boolean matchingTimestamp(Cell a, Cell b) {
+    return CellComparator.compareTimestamps(a.getTimestamp(), b.getTimestamp()) == 0;
+  }
+
+  public static boolean matchingType(Cell a, Cell b) {
+    return a.getTypeByte() == b.getTypeByte();
+  }
+
+  /**
+   * Compares the row of two keyvalues for equality
+   * 
+   * @param left
+   * @param right
+   * @return True if rows match.
+   */
+  public static boolean matchingRows(final Cell left, final Cell right) {
+    short lrowlength = left.getRowLength();
+    short rrowlength = right.getRowLength();
+    return matchingRows(left, lrowlength, right, rrowlength);
+  }
+
+  /**
+   * @param left
+   * @param lrowlength
+   * @param right
+   * @param rrowlength
+   * @return True if rows match.
+   */
+  private static boolean matchingRows(final Cell left, final short lrowlength, final Cell right,
+      final short rrowlength) {
+    return lrowlength == rrowlength
+        && matchingRows(left.getRowArray(), left.getRowOffset(), lrowlength, right.getRowArray(),
+            right.getRowOffset(), rrowlength);
+  }
+
+  /**
+   * Compare rows. Just calls Bytes.equals, but it's good to have this
+   * encapsulated.
+   * 
+   * @param left
+   *          Left row array.
+   * @param loffset
+   *          Left row offset.
+   * @param llength
+   *          Left row length.
+   * @param right
+   *          Right row array.
+   * @param roffset
+   *          Right row offset.
+   * @param rlength
+   *          Right row length.
+   * @return Whether rows are the same row.
+   */
+  private static boolean matchingRows(final byte[] left, final int loffset, final int llength,
+      final byte[] right, final int roffset, final int rlength) {
+    return Bytes.equals(left, loffset, llength, right, roffset, rlength);
+  }
+
+  /**
+   * Compares the row and column of two keyvalues for equality
+   * 
+   * @param left
+   * @param right
+   * @return True if same row and column.
+   */
+  public static boolean matchingRowColumn(final Cell left, final Cell right) {
+    short lrowlength = left.getRowLength();
+    short rrowlength = right.getRowLength();
+
+    if ((lrowlength + left.getFamilyLength() + left.getQualifierLength()) != (rrowlength
+        + right.getFamilyLength() + right.getQualifierLength())) {
+      return false;
+    }
+
+    if (!matchingRows(left, lrowlength, right, rrowlength)) {
+      return false;
+    }
+    return matchingColumn(left, right);
+  }
+
+  /**
+   * Create a Cell that is smaller than all other possible Cells for the given Cell's row.
+   *
+   * @param cell
+   * @return First possible Cell on passed Cell's row.
+   */
+  public static Cell createFirstOnRow(final Cell cell) {
+    return new FirstOnRowFakeCell(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength());
+  }
+
+  @InterfaceAudience.Private
+  private static abstract class FakeCell implements Cell {
+
+    @Override
+    public byte[] getRowArray() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public int getRowOffset() {
+      return 0;
+    }
+
+    @Override
+    public short getRowLength() {
+      return 0;
+    }
+
+    @Override
+    public byte[] getFamilyArray() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public int getFamilyOffset() {
+      return 0;
+    }
+
+    @Override
+    public byte getFamilyLength() {
+      return 0;
+    }
+
+    @Override
+    public byte[] getQualifierArray() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public int getQualifierOffset() {
+      return 0;
+    }
+
+    @Override
+    public int getQualifierLength() {
+      return 0;
+    }
+
+    @Override
+    public long getMvccVersion() {
+      return getSequenceId();
+    }
+
+    @Override
+    public long getSequenceId() {
+      return 0;
+    }
+
+    @Override
+    public byte[] getValueArray() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public int getValueOffset() {
+      return 0;
+    }
+
+    @Override
+    public int getValueLength() {
+      return 0;
+    }
+
+    @Override
+    public byte[] getTagsArray() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public int getTagsOffset() {
+      return 0;
+    }
+
+    @Override
+    public int getTagsLength() {
+      return 0;
+    }
+
+    @Override
+    public byte[] getValue() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public byte[] getFamily() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public byte[] getQualifier() {
+      return EMPTY_BYTE_ARRAY;
+    }
+
+    @Override
+    public byte[] getRow() {
+      return EMPTY_BYTE_ARRAY;
+    }
+  }
+
+  @InterfaceAudience.Private
+  private static class FirstOnRowFakeCell extends FakeCell {
+    private final byte[] rowArray;
+    private final int roffest;
+    private final short rlength;
+
+    public FirstOnRowFakeCell(final byte[] row, int roffset, short rlength) {
+      this.rowArray = row;
+      this.roffest = roffset;
+      this.rlength = rlength;
+    }
+
+    @Override
+    public byte[] getRowArray() {
+      return this.rowArray;
+    }
+
+    @Override
+    public int getRowOffset() {
+      return this.roffest;
+    }
+
+    @Override
+    public short getRowLength() {
+      return this.rlength;
+    }
+
+    @Override
+    public long getTimestamp() {
+      return HConstants.LATEST_TIMESTAMP;
+    }
+
+    @Override
+    public byte getTypeByte() {
+      return Type.Maximum.getCode();
+    }
+
+    @Override
+    public byte[] getRow() {
+      return Bytes.copy(this.rowArray, this.roffest, this.rlength);
+    }
   }
 }

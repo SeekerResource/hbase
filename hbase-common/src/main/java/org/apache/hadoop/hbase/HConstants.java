@@ -158,9 +158,6 @@ public final class HConstants {
   /** Name of ZooKeeper quorum configuration parameter. */
   public static final String ZOOKEEPER_QUORUM = "hbase.zookeeper.quorum";
 
-  /** Name of ZooKeeper config file in conf/ directory. */
-  public static final String ZOOKEEPER_CONFIG_NAME = "zoo.cfg";
-
   /** Common prefix of ZooKeeper configuration properties */
   public static final String ZK_CFG_PROPERTY_PREFIX =
       "hbase.zookeeper.property.";
@@ -284,7 +281,7 @@ public final class HConstants {
     "hbase.client.meta.operation.timeout";
 
   /** Default HBase client operation timeout, which is tantamount to a blocking call */
-  public static final int DEFAULT_HBASE_CLIENT_OPERATION_TIMEOUT = Integer.MAX_VALUE;
+  public static final int DEFAULT_HBASE_CLIENT_OPERATION_TIMEOUT = 1200000;
 
   /** Used to construct the name of the log directory for a region server */
   public static final String HREGION_LOGDIR_NAME = "WALs";
@@ -612,12 +609,19 @@ public final class HConstants {
    */
   public static final UUID DEFAULT_CLUSTER_ID = new UUID(0L,0L);
 
-    /**
-     * Parameter name for maximum number of bytes returned when calling a
-     * scanner's next method.
-     */
+  /**
+   * Parameter name for maximum number of bytes returned when calling a scanner's next method.
+   * Controlled by the client.
+   */
   public static final String HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE_KEY =
       "hbase.client.scanner.max.result.size";
+
+  /**
+   * Parameter name for maximum number of bytes returned when calling a scanner's next method.
+   * Controlled by the server.
+   */
+  public static final String HBASE_SERVER_SCANNER_MAX_RESULT_SIZE_KEY =
+      "hbase.server.scanner.max.result.size";
 
   /**
    * Maximum number of bytes returned when calling a scanner's next method.
@@ -627,6 +631,16 @@ public final class HConstants {
    * The default value is 2MB.
    */
   public static final long DEFAULT_HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE = 2 * 1024 * 1024;
+
+  /**
+   * Maximum number of bytes returned when calling a scanner's next method.
+   * Note that when a single row is larger than this limit the row is still
+   * returned completely.
+   * Safety setting to protect the region server.
+   *
+   * The default value is 100MB. (a client would rarely request larger chunks on purpose)
+   */
+  public static final long DEFAULT_HBASE_SERVER_SCANNER_MAX_RESULT_SIZE = 100 * 1024 * 1024;
 
   /**
    * Parameter name for client pause value, used mostly as value to wait
@@ -895,7 +909,7 @@ public final class HConstants {
   //High priority handlers to deal with admin requests and system table operation requests
   public static final String REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT =
       "hbase.regionserver.metahandler.count";
-  public static final int DEFAULT_REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT = 10;
+  public static final int DEFAULT_REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT = 20;
 
   public static final String REGION_SERVER_REPLICATION_HANDLER_COUNT =
       "hbase.regionserver.replication.handler.count";
@@ -940,9 +954,9 @@ public final class HConstants {
 
   /** Configuration name of WAL storage policy
    * Valid values are:
-   *  NONE: no preference in destination of replicas
-   *  ONE_SSD: place only one replica in SSD and the remaining in default storage
-   *  and ALL_SSD: place all replica on SSD
+   *  NONE: no preference in destination of block replicas
+   *  ONE_SSD: place only one block replica in SSD and the remaining in default storage
+   *  and ALL_SSD: place all block replicas on SSD
    *
    * See http://hadoop.apache.org/docs/r2.6.0/hadoop-project-dist/hadoop-hdfs/ArchivalStorage.html*/
   public static final String WAL_STORAGE_POLICY = "hbase.wal.storage.policy";
@@ -960,22 +974,19 @@ public final class HConstants {
   public static final Cell NO_NEXT_INDEXED_KEY = new KeyValue();
   /** delimiter used between portions of a region name */
   public static final int DELIMITER = ',';
-  public static final String HBASE_CONFIG_READ_ZOOKEEPER_CONFIG =
-      "hbase.config.read.zookeeper.config";
-  public static final boolean DEFAULT_HBASE_CONFIG_READ_ZOOKEEPER_CONFIG =
-      false;
 
   /**
    * QOS attributes: these attributes are used to demarcate RPC call processing
    * by different set of handlers. For example, HIGH_QOS tagged methods are
    * handled by high priority handlers.
    */
+  // normal_QOS < QOS_threshold < replication_QOS < replay_QOS < admin_QOS < high_QOS
   public static final int NORMAL_QOS = 0;
   public static final int QOS_THRESHOLD = 10;
   public static final int HIGH_QOS = 200;
-  public static final int REPLICATION_QOS = 5; // normal_QOS < replication_QOS < high_QOS
-  public static final int REPLAY_QOS = 6; // REPLICATION_QOS < REPLAY_QOS < high_QOS
-  public static final int ADMIN_QOS = 100; // QOS_THRESHOLD < ADMIN_QOS < high_QOS
+  public static final int REPLICATION_QOS = 5;
+  public static final int REPLAY_QOS = 6;
+  public static final int ADMIN_QOS = 100;
   public static final int SYSTEMTABLE_QOS = HIGH_QOS;
 
   /** Directory under /hbase where archived hfiles are stored */
@@ -1122,7 +1133,8 @@ public final class HConstants {
 
   /**
    * When using bucket cache, this is a float that EITHER represents a percentage of total heap
-   * memory size to give to the cache (if < 1.0) OR, it is the capacity in megabytes of the cache.
+   * memory size to give to the cache (if &lt; 1.0) OR, it is the capacity in
+   * megabytes of the cache.
    */
   public static final String BUCKET_CACHE_SIZE_KEY = "hbase.bucketcache.size";
 

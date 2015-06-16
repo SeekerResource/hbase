@@ -60,7 +60,6 @@ import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -77,7 +76,7 @@ import com.google.protobuf.ServiceException;
  */
 @Category({LargeTests.class, ClientTests.class})
 public class TestAdmin1 {
-  final Log LOG = LogFactory.getLog(getClass());
+  private static final Log LOG = LogFactory.getLog(TestAdmin1.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private Admin admin;
 
@@ -145,7 +144,7 @@ public class TestAdmin1 {
     HColumnDescriptor nonexistentHcd = new HColumnDescriptor(nonexistentColumn);
     Exception exception = null;
     try {
-      this.admin.addColumn(nonexistentTable, nonexistentHcd);
+      this.admin.addColumnFamily(nonexistentTable, nonexistentHcd);
     } catch (IOException e) {
       exception = e;
     }
@@ -161,7 +160,7 @@ public class TestAdmin1 {
 
     exception = null;
     try {
-      this.admin.deleteColumn(nonexistentTable, nonexistentColumn);
+      this.admin.deleteColumnFamily(nonexistentTable, nonexistentColumn);
     } catch (IOException e) {
       exception = e;
     }
@@ -185,7 +184,7 @@ public class TestAdmin1 {
 
     exception = null;
     try {
-      this.admin.modifyColumn(nonexistentTable, nonexistentHcd);
+      this.admin.modifyColumnFamily(nonexistentTable, nonexistentHcd);
     } catch (IOException e) {
       exception = e;
     }
@@ -211,7 +210,7 @@ public class TestAdmin1 {
     try {
       exception = null;
       try {
-        this.admin.deleteColumn(htd.getTableName(), nonexistentHcd.getName());
+        this.admin.deleteColumnFamily(htd.getTableName(), nonexistentHcd.getName());
       } catch (IOException e) {
         exception = e;
       }
@@ -220,7 +219,7 @@ public class TestAdmin1 {
 
       exception = null;
       try {
-        this.admin.modifyColumn(htd.getTableName(), nonexistentHcd);
+        this.admin.modifyColumnFamily(htd.getTableName(), nonexistentHcd);
       } catch (IOException e) {
         exception = e;
       }
@@ -545,7 +544,7 @@ public class TestAdmin1 {
     final byte [] hcdName = hcd.getName();
     expectedException = false;
     try {
-      this.admin.modifyColumn(tableName, hcd);
+      this.admin.modifyColumnFamily(tableName, hcd);
     } catch (TableNotDisabledException re) {
       expectedException = true;
     }
@@ -561,7 +560,7 @@ public class TestAdmin1 {
     xtracol.setValue(xtracolName, xtracolName);
     expectedException = false;
     try {
-      this.admin.addColumn(tableName, xtracol);
+      this.admin.addColumnFamily(tableName, xtracol);
     } catch (TableNotDisabledException re) {
       expectedException = true;
     }
@@ -573,7 +572,7 @@ public class TestAdmin1 {
     assertTrue(hcd.getValue(xtracolName).equals(xtracolName));
 
     // Delete the just-added column.
-    this.admin.deleteColumn(tableName, xtracol.getName());
+    this.admin.deleteColumnFamily(tableName, xtracol.getName());
     modifiedHtd = this.admin.getTableDescriptor(tableName);
     hcd = modifiedHtd.getFamily(xtracol.getName());
     assertTrue(hcd == null);
@@ -1272,16 +1271,6 @@ public class TestAdmin1 {
     }
   }
 
-  /**
-   * HADOOP-2156
-   * @throws IOException
-   */
-  @SuppressWarnings("deprecation")
-  @Test (expected=IllegalArgumentException.class, timeout=300000)
-  public void testEmptyHTableDescriptor() throws IOException {
-    this.admin.createTable(new HTableDescriptor());
-  }
-
   @Test (expected=IllegalArgumentException.class, timeout=300000)
   public void testInvalidHColumnDescriptor() throws IOException {
      new HColumnDescriptor("/cfamily/name");
@@ -1289,10 +1278,9 @@ public class TestAdmin1 {
 
   @Test (timeout=300000)
   public void testEnableDisableAddColumnDeleteColumn() throws Exception {
-    ZooKeeperWatcher zkw = HBaseTestingUtility.getZooKeeperWatcher(TEST_UTIL);
-    TableName tableName = TableName.valueOf("testMasterAdmin");
+    TableName tableName = TableName.valueOf("testEnableDisableAddColumnDeleteColumn");
     TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY).close();
-    while (!this.admin.isTableEnabled(TableName.valueOf("testMasterAdmin"))) {
+    while (!this.admin.isTableEnabled(TableName.valueOf("testEnableDisableAddColumnDeleteColumn"))) {
       Thread.sleep(10);
     }
     this.admin.disableTable(tableName);
@@ -1302,14 +1290,43 @@ public class TestAdmin1 {
       //expected
     }
 
-    this.admin.addColumn(tableName, new HColumnDescriptor("col2"));
+    this.admin.addColumnFamily(tableName, new HColumnDescriptor("col2"));
     this.admin.enableTable(tableName);
     try {
-      this.admin.deleteColumn(tableName, Bytes.toBytes("col2"));
+      this.admin.deleteColumnFamily(tableName, Bytes.toBytes("col2"));
     } catch (TableNotDisabledException e) {
       LOG.info(e);
     }
     this.admin.disableTable(tableName);
+    this.admin.deleteTable(tableName);
+  }
+
+  @Test (timeout=300000)
+  public void testDeleteLastColumnFamily() throws Exception {
+    TableName tableName = TableName.valueOf("testDeleteLastColumnFamily");
+    TEST_UTIL.createTable(tableName, HConstants.CATALOG_FAMILY).close();
+    while (!this.admin.isTableEnabled(TableName.valueOf("testDeleteLastColumnFamily"))) {
+      Thread.sleep(10);
+    }
+
+    // test for enabled table
+    try {
+      this.admin.deleteColumnFamily(tableName, HConstants.CATALOG_FAMILY);
+      fail("Should have failed to delete the only column family of a table");
+    } catch (InvalidFamilyOperationException ex) {
+      // expected
+    }
+
+    // test for disabled table
+    this.admin.disableTable(tableName);
+
+    try {
+      this.admin.deleteColumnFamily(tableName, HConstants.CATALOG_FAMILY);
+      fail("Should have failed to delete the only column family of a table");
+    } catch (InvalidFamilyOperationException ex) {
+      // expected
+    }
+
     this.admin.deleteTable(tableName);
   }
 }

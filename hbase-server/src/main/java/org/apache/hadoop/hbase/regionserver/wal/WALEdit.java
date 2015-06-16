@@ -45,6 +45,8 @@ import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.io.Writable;
 
+import com.google.common.annotations.VisibleForTesting;
+
 
 /**
  * WALEdit: Used in HBase's transaction log (WAL) to represent
@@ -55,9 +57,9 @@ import org.apache.hadoop.io.Writable;
  * Previously, if a transaction contains 3 edits to c1, c2, c3 for a row R,
  * the WAL would have three log entries as follows:
  *
- *    <logseq1-for-edit1>:<KeyValue-for-edit-c1>
- *    <logseq2-for-edit2>:<KeyValue-for-edit-c2>
- *    <logseq3-for-edit3>:<KeyValue-for-edit-c3>
+ *    &lt;logseq1-for-edit1&gt;:&lt;eyValue-for-edit-c1&gt;
+ *    &lt;logseq2-for-edit2&gt;:&lt;KeyValue-for-edit-c2&gt;
+ *    &lt;logseq3-for-edit3&gt;:&lt;KeyValue-for-edit-c3&gt;
  *
  * This presents problems because row level atomicity of transactions
  * was not guaranteed. If we crash after few of the above appends make
@@ -66,15 +68,15 @@ import org.apache.hadoop.io.Writable;
  * In the new world, all the edits for a given transaction are written
  * out as a single record, for example:
  *
- *   <logseq#-for-entire-txn>:<WALEdit-for-entire-txn>
+ *   &lt;logseq#-for-entire-txn&gt;:&lt;WALEdit-for-entire-txn&gt;
  *
  * where, the WALEdit is serialized as:
- *   <-1, # of edits, <KeyValue>, <KeyValue>, ... >
+ *   &lt;-1, # of edits, &lt;KeyValue&gt;, &lt;KeyValue&gt;, ... &gt;
  * For example:
- *   <-1, 3, <Keyvalue-for-edit-c1>, <KeyValue-for-edit-c2>, <KeyValue-for-edit-c3>>
+ *   &lt;-1, 3, &lt;Keyvalue-for-edit-c1&gt;, &lt;KeyValue-for-edit-c2&gt;, &lt;KeyValue-for-edit-c3&gt;&gt;
  *
  * The -1 marker is just a special way of being backward compatible with
- * an old WAL which would have contained a single <KeyValue>.
+ * an old WAL which would have contained a single &lt;KeyValue&gt;.
  *
  * The deserializer for WALEdit backward compatibly detects if the record
  * is an old style KeyValue or the new style WALEdit.
@@ -83,7 +85,7 @@ import org.apache.hadoop.io.Writable;
 @InterfaceAudience.LimitedPrivate({ HBaseInterfaceAudience.REPLICATION,
     HBaseInterfaceAudience.COPROC })
 public class WALEdit implements Writable, HeapSize {
-  public static final Log LOG = LogFactory.getLog(WALEdit.class);
+  private static final Log LOG = LogFactory.getLog(WALEdit.class);
 
   // TODO: Get rid of this; see HBASE-8457
   public static final byte [] METAFAMILY = Bytes.toBytes("METAFAMILY");
@@ -91,6 +93,7 @@ public class WALEdit implements Writable, HeapSize {
   static final byte[] COMPACTION = Bytes.toBytes("HBASE::COMPACTION");
   static final byte [] FLUSH = Bytes.toBytes("HBASE::FLUSH");
   static final byte [] REGION_EVENT = Bytes.toBytes("HBASE::REGION_EVENT");
+  @VisibleForTesting
   public static final byte [] BULK_LOAD = Bytes.toBytes("HBASE::BULK_LOAD");
 
   private final int VERSION_2 = -1;
@@ -185,7 +188,7 @@ public class WALEdit implements Writable, HeapSize {
         if (compressionContext != null) {
           this.add(KeyValueCompression.readKV(in, compressionContext));
         } else {
-          this.add(KeyValue.create(in));
+          this.add(KeyValueUtil.create(in));
         }
       }
       int numFamilies = in.readInt();
@@ -202,7 +205,7 @@ public class WALEdit implements Writable, HeapSize {
     } else {
       // this is an old style WAL entry. The int that we just
       // read is actually the length of a single KeyValue
-      this.add(KeyValue.create(versionOrLength, in));
+      this.add(KeyValueUtil.create(versionOrLength, in));
     }
   }
 
@@ -218,7 +221,7 @@ public class WALEdit implements Writable, HeapSize {
       if (compressionContext != null) {
         KeyValueCompression.writeKV(out, kv, compressionContext);
       } else{
-        KeyValue.write(kv, out);
+        KeyValueUtil.write(kv, out);
       }
     }
     if (scopes == null) {

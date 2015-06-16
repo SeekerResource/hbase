@@ -42,7 +42,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSTableDescriptors;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -231,7 +231,7 @@ public abstract class HBaseTestCase extends TestCase {
    * @throws IOException
    * @return count of what we added.
    */
-  public static long addContent(final HRegion r, final byte [] columnFamily, final byte[] column)
+  public static long addContent(final Region r, final byte [] columnFamily, final byte[] column)
   throws IOException {
     byte [] startKey = r.getRegionInfo().getStartKey();
     byte [] endKey = r.getRegionInfo().getEndKey();
@@ -243,8 +243,7 @@ public abstract class HBaseTestCase extends TestCase {
       startKeyBytes, endKey, -1);
   }
 
-  public static long addContent(final HRegion r, final byte [] columnFamily)
-  throws IOException {
+  public static long addContent(final Region r, final byte [] columnFamily) throws IOException {
     return addContent(r, columnFamily, null);
   }
 
@@ -440,6 +439,10 @@ public abstract class HBaseTestCase extends TestCase {
       this.region = HRegion;
     }
 
+    public HRegionIncommon(final Region region) {
+      this.region = (HRegion)region;
+    }
+
     public void put(Put put) throws IOException {
       region.put(put);
     }
@@ -470,7 +473,7 @@ public abstract class HBaseTestCase extends TestCase {
       }
 
     public void flushcache() throws IOException {
-      this.region.flushcache();
+      this.region.flush(true);
     }
   }
 
@@ -564,7 +567,7 @@ public abstract class HBaseTestCase extends TestCase {
     @Override
     public boolean next(List<Cell> results)
     throws IOException {
-      return NextState.hasMoreValues(scanner.next(results));
+      return scanner.next(results);
     }
 
     @Override

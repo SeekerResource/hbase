@@ -28,6 +28,8 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.HashedWheelTimer;
+import io.netty.util.Timeout;
+import io.netty.util.TimerTask;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.Promise;
@@ -40,6 +42,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CellScanner;
@@ -66,12 +71,15 @@ import com.google.protobuf.RpcController;
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.CONFIG)
 public class AsyncRpcClient extends AbstractRpcClient {
 
+  private static final Log LOG = LogFactory.getLog(AsyncRpcClient.class);
+
   public static final String CLIENT_MAX_THREADS = "hbase.rpc.client.threads.max";
   public static final String USE_NATIVE_TRANSPORT = "hbase.rpc.client.nativetransport";
   public static final String USE_GLOBAL_EVENT_LOOP_GROUP = "hbase.rpc.client.globaleventloopgroup";
 
-  public static final HashedWheelTimer WHEEL_TIMER =
-      new HashedWheelTimer(100, TimeUnit.MILLISECONDS);
+  private static final HashedWheelTimer WHEEL_TIMER =
+      new HashedWheelTimer(Threads.newDaemonThreadFactory("AsyncRpcChannel-timer"),
+          100, TimeUnit.MILLISECONDS);
 
   private static final ChannelInitializer<SocketChannel> DEFAULT_CHANNEL_INITIALIZER =
       new ChannelInitializer<SocketChannel>() {
@@ -117,7 +125,7 @@ public class AsyncRpcClient extends AbstractRpcClient {
     boolean epollEnabled = conf.getBoolean(USE_NATIVE_TRANSPORT, false);
 
     // Use the faster native epoll transport mechanism on linux if enabled
-    if (epollEnabled && JVM.isLinux()) {
+    if (epollEnabled && JVM.isLinux() && JVM.isAmd64()) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Create EpollEventLoopGroup with maxThreads = " + maxThreads);
       }
@@ -414,7 +422,6 @@ public class AsyncRpcClient extends AbstractRpcClient {
    * @param rpcTimeout default rpc operation timeout
    *
    * @return A rpc channel that goes via this rpc client instance.
-   * @throws IOException when channel could not be created
    */
   public RpcChannel createRpcChannel(final ServerName sn, final User user, int rpcTimeout) {
     return new RpcChannelImplementation(this, sn, user, rpcTimeout);
@@ -457,5 +464,9 @@ public class AsyncRpcClient extends AbstractRpcClient {
 
       this.rpcClient.callMethod(md, pcrc, param, returnType, this.ticket, this.isa, done);
     }
+  }
+
+  Timeout newTimeout(TimerTask task, long delay, TimeUnit unit) {
+    return WHEEL_TIMER.newTimeout(task, delay, unit);
   }
 }

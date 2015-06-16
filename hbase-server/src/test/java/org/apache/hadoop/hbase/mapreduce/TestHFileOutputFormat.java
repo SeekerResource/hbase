@@ -109,7 +109,7 @@ public class TestHFileOutputFormat  {
 
   private HBaseTestingUtility util = new HBaseTestingUtility();
 
-  private static Log LOG = LogFactory.getLog(TestHFileOutputFormat.class);
+  private static final Log LOG = LogFactory.getLog(TestHFileOutputFormat.class);
 
   /**
    * Simple mapper that makes KeyValue output.
@@ -125,6 +125,7 @@ public class TestHFileOutputFormat  {
     private int valLength;
     private static final int VALLEN_DEFAULT=10;
     private static final String VALLEN_CONF="randomkv.val.length";
+    private static final byte [] QUALIFIER = Bytes.toBytes("data");
 
     @Override
     protected void setup(Context context) throws IOException,
@@ -159,8 +160,7 @@ public class TestHFileOutputFormat  {
         ImmutableBytesWritable key = new ImmutableBytesWritable(keyBytes);
 
         for (byte[] family : TestHFileOutputFormat.FAMILIES) {
-          KeyValue kv = new KeyValue(keyBytes, family,
-              PerformanceEvaluation.QUALIFIER_NAME, valBytes);
+          KeyValue kv = new KeyValue(keyBytes, family, QUALIFIER, valBytes);
           context.write(key, kv);
         }
       }
@@ -335,7 +335,9 @@ public class TestHFileOutputFormat  {
 
   @Test
   public void testJobConfiguration() throws Exception {
-    Job job = new Job(util.getConfiguration());
+    Configuration conf = new Configuration(this.util.getConfiguration());
+    conf.set("hbase.fs.tmp.dir", util.getDataTestDir("testJobConfiguration").toString());
+    Job job = new Job(conf);
     job.setWorkingDirectory(util.getDataTestDir("testJobConfiguration"));
     HTableDescriptor tableDescriptor = Mockito.mock(HTableDescriptor.class);
     RegionLocator regionLocator = Mockito.mock(RegionLocator.class);
@@ -383,11 +385,10 @@ public class TestHFileOutputFormat  {
     util = new HBaseTestingUtility();
     Configuration conf = util.getConfiguration();
     byte[][] splitKeys = generateRandomSplitKeys(4);
-    HBaseAdmin admin = null;
     try {
       util.startMiniCluster();
       Path testDir = util.getDataTestDirOnTestFS("testLocalMRIncrementalLoad");
-      admin = util.getHBaseAdmin();
+      HBaseAdmin admin = util.getHBaseAdmin();
       HTable table = util.createTable(TABLE_NAME, FAMILIES, splitKeys);
       assertEquals("Should start with empty table",
           0, util.countRows(table));
@@ -466,7 +467,6 @@ public class TestHFileOutputFormat  {
       assertEquals("Data should remain after reopening of regions",
           tableDigestBefore, util.checksumRows(table));
     } finally {
-      if (admin != null) admin.close();
       util.shutdownMiniMapReduceCluster();
       util.shutdownMiniCluster();
     }
@@ -822,6 +822,7 @@ public class TestHFileOutputFormat  {
       // We turn off the sequence file compression, because DefaultCodec
       // pollutes the GZip codec pool with an incompatible compressor.
       conf.set("io.seqfile.compression.type", "NONE");
+      conf.set("hbase.fs.tmp.dir", dir.toString());
       Job job = new Job(conf, "testLocalMRIncrementalLoad");
       job.setWorkingDirectory(util.getDataTestDirOnTestFS("testColumnFamilySettings"));
       setupRandomGeneratorMapper(job);
@@ -858,7 +859,7 @@ public class TestHFileOutputFormat  {
           "(reader: " + reader + ")",
           hcd.getBloomFilterType(), BloomType.valueOf(Bytes.toString(bloomFilter)));
         assertEquals("Incorrect compression used for column family " + familyStr +
-          "(reader: " + reader + ")", hcd.getCompression(), reader.getFileContext().getCompression());
+          "(reader: " + reader + ")", hcd.getCompressionType(), reader.getFileContext().getCompression());
       }
     } finally {
       dir.getFileSystem(conf).delete(dir, true);
@@ -878,7 +879,7 @@ public class TestHFileOutputFormat  {
 
     int taskId = context.getTaskAttemptID().getTaskID().getId();
     assert taskId < Byte.MAX_VALUE : "Unit tests dont support > 127 tasks!";
-
+    final byte [] qualifier = Bytes.toBytes("data");
     Random random = new Random();
     for (int i = 0; i < numRows; i++) {
 
@@ -887,8 +888,7 @@ public class TestHFileOutputFormat  {
       ImmutableBytesWritable key = new ImmutableBytesWritable(keyBytes);
 
       for (byte[] family : families) {
-        KeyValue kv = new KeyValue(keyBytes, family,
-            PerformanceEvaluation.QUALIFIER_NAME, valBytes);
+        KeyValue kv = new KeyValue(keyBytes, family, qualifier, valBytes);
         writer.write(key, kv);
       }
     }
@@ -909,7 +909,7 @@ public class TestHFileOutputFormat  {
     try {
       util.startMiniCluster();
       final FileSystem fs = util.getDFSCluster().getFileSystem();
-      HBaseAdmin admin = new HBaseAdmin(conf);
+      HBaseAdmin admin = util.getHBaseAdmin();
       HTable table = util.createTable(TABLE_NAME, FAMILIES);
       assertEquals("Should start with empty table", 0, util.countRows(table));
 

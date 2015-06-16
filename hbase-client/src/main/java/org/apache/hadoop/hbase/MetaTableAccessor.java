@@ -40,13 +40,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Consistency;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionLocator;
@@ -66,7 +64,6 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.ExceptionUtil;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.PairOfSameType;
-import org.apache.hadoop.hbase.util.Threads;
 
 /**
  * Read/write operations on region and assignment information store in
@@ -122,6 +119,7 @@ public class MetaTableAccessor {
    */
 
   private static final Log LOG = LogFactory.getLog(MetaTableAccessor.class);
+  private static final Log METALOG = LogFactory.getLog("org.apache.hadoop.hbase.META");
 
   static final byte [] META_REGION_PREFIX;
   static {
@@ -182,7 +180,7 @@ public class MetaTableAccessor {
     }
   }
 
-  /** The delimiter for meta columns for replicaIds > 0 */
+  /** The delimiter for meta columns for replicaIds &gt; 0 */
   protected static final char META_REPLICA_ID_DELIMITER = '_';
 
   /** A regex for parsing server columns from meta. See above javadoc for meta layout */
@@ -250,21 +248,10 @@ public class MetaTableAccessor {
   static Table getMetaHTable(final Connection connection)
   throws IOException {
     // We used to pass whole CatalogTracker in here, now we just pass in Connection
-    if (connection == null || connection.isClosed()) {
+    if (connection == null) {
       throw new NullPointerException("No connection");
-    }
-    // If the passed in 'connection' is 'managed' -- i.e. every second test uses
-    // a Table or an HBaseAdmin with managed connections -- then doing
-    // connection.getTable will throw an exception saying you are NOT to use
-    // managed connections getting tables.  Leaving this as it is for now. Will
-    // revisit when inclined to change all tests.  User code probaby makes use of
-    // managed connections too so don't change it till post hbase 1.0.
-    //
-    // There should still be a way to use this method with an unmanaged connection.
-    if (connection instanceof ClusterConnection) {
-      if (((ClusterConnection) connection).isManaged()) {
-        return new HTable(TableName.META_TABLE_NAME, connection);
-      }
+    } else if (connection.isClosed()) {
+      throw new IOException("connection is closed");
     }
     return connection.getTable(TableName.META_TABLE_NAME);
   }
@@ -1093,7 +1080,7 @@ public class MetaTableAccessor {
   /**
    * Fetch table states from META table
    * @param conn connection to use
-   * @return map {tableName -> state}
+   * @return map {tableName -&gt; state}
    * @throws IOException
    */
   public static Map<TableName, TableState> getTableStates(Connection conn)
@@ -1301,8 +1288,15 @@ public class MetaTableAccessor {
    */
   public static Put makePutFromRegionInfo(HRegionInfo regionInfo)
     throws IOException {
-    long now = EnvironmentEdgeManager.currentTime();
-    Put put = new Put(regionInfo.getRegionName(), now);
+    return makePutFromRegionInfo(regionInfo, EnvironmentEdgeManager.currentTime());
+  }
+
+  /**
+   * Generates and returns a Put containing the region into for the catalog table
+   */
+  public static Put makePutFromRegionInfo(HRegionInfo regionInfo, long ts)
+    throws IOException {
+    Put put = new Put(regionInfo.getRegionName(), ts);
     addRegionInfo(put, regionInfo);
     return put;
   }
@@ -1354,6 +1348,9 @@ public class MetaTableAccessor {
    */
   private static void put(final Table t, final Put p) throws IOException {
     try {
+      if (METALOG.isDebugEnabled()) {
+        METALOG.debug(mutationToString(p));
+      }
       t.put(p);
     } finally {
       t.close();
@@ -1370,6 +1367,9 @@ public class MetaTableAccessor {
     throws IOException {
     Table t = getMetaHTable(connection);
     try {
+      if (METALOG.isDebugEnabled()) {
+        METALOG.debug(mutationsToString(ps));
+      }
       t.put(ps);
     } finally {
       t.close();
@@ -1399,6 +1399,9 @@ public class MetaTableAccessor {
     throws IOException {
     Table t = getMetaHTable(connection);
     try {
+      if (METALOG.isDebugEnabled()) {
+        METALOG.debug(mutationsToString(deletes));
+      }
       t.delete(deletes);
     } finally {
       t.close();
@@ -1443,7 +1446,10 @@ public class MetaTableAccessor {
     throws IOException {
     Table t = getMetaHTable(connection);
     try {
-      t.batch(mutations);
+      if (METALOG.isDebugEnabled()) {
+        METALOG.debug(mutationsToString(mutations));
+      }
+      t.batch(mutations, new Object[mutations.size()]);
     } catch (InterruptedException e) {
       InterruptedIOException ie = new InterruptedIOException(e.getMessage());
       ie.initCause(e);
@@ -1494,6 +1500,9 @@ public class MetaTableAccessor {
     Put put = makePutFromRegionInfo(regionInfo);
     addDaughtersToPut(put, splitA, splitB);
     meta.put(put);
+    if (METALOG.isDebugEnabled()) {
+      METALOG.debug(mutationToString(put));
+    }
     if (LOG.isDebugEnabled()) {
       LOG.debug("Added " + regionInfo.getRegionNameAsString());
     }
@@ -1530,11 +1539,23 @@ public class MetaTableAccessor {
   public static void addRegionsToMeta(Connection connection,
                                       List<HRegionInfo> regionInfos, int regionReplication)
     throws IOException {
+    addRegionsToMeta(connection, regionInfos, regionReplication, HConstants.LATEST_TIMESTAMP);
+  }
+  /**
+   * Adds a hbase:meta row for each of the specified new regions.
+   * @param connection connection we're using
+   * @param regionInfos region information list
+   * @param regionReplication
+   * @param ts desired timestamp
+   * @throws IOException if problem connecting or updating meta
+   */
+  public static void addRegionsToMeta(Connection connection,
+      List<HRegionInfo> regionInfos, int regionReplication, long ts)
+          throws IOException {
     List<Put> puts = new ArrayList<Put>();
     for (HRegionInfo regionInfo : regionInfos) {
       if (RegionReplicaUtil.isDefaultReplica(regionInfo)) {
-        puts.add(makePutFromRegionInfo(regionInfo));
-        Put put = makePutFromRegionInfo(regionInfo);
+        Put put = makePutFromRegionInfo(regionInfo, ts);
         // Add empty locations for region replicas so that number of replicas can be cached
         // whenever the primary region is looked up from meta
         for (int i = 1; i < regionReplication; i++) {
@@ -1560,7 +1581,7 @@ public class MetaTableAccessor {
     Put put = new Put(regionInfo.getRegionName(), now);
     addRegionInfo(put, regionInfo);
     if (sn != null) {
-      addLocation(put, sn, openSeqNum, regionInfo.getReplicaId());
+      addLocation(put, sn, openSeqNum, -1, regionInfo.getReplicaId());
     }
     putToMetaTable(connection, put);
     LOG.info("Added daughter " + regionInfo.getEncodedName() +
@@ -1597,7 +1618,7 @@ public class MetaTableAccessor {
       Delete deleteB = makeDeleteFromRegionInfo(regionB);
 
       // The merged is a new region, openSeqNum = 1 is fine.
-      addLocation(putOfMerged, sn, 1, mergedRegion.getReplicaId());
+      addLocation(putOfMerged, sn, 1, -1, mergedRegion.getReplicaId());
 
       // Add empty locations for region replicas of the merged region so that number of replicas can
       // be cached whenever the primary region is looked up from meta
@@ -1641,8 +1662,8 @@ public class MetaTableAccessor {
       Put putA = makePutFromRegionInfo(splitA);
       Put putB = makePutFromRegionInfo(splitB);
 
-      addLocation(putA, sn, 1, splitA.getReplicaId()); //new regions, openSeqNum = 1 is fine.
-      addLocation(putB, sn, 1, splitB.getReplicaId());
+      addLocation(putA, sn, 1, -1, splitA.getReplicaId()); //new regions, openSeqNum = 1 is fine.
+      addLocation(putB, sn, 1, -1, splitB.getReplicaId());
 
       // Add empty locations for region replicas of daughters so that number of replicas can be
       // cached whenever the primary region is looked up from meta
@@ -1705,6 +1726,9 @@ public class MetaTableAccessor {
     CoprocessorRpcChannel channel = table.coprocessorService(row);
     MultiRowMutationProtos.MutateRowsRequest.Builder mmrBuilder
       = MultiRowMutationProtos.MutateRowsRequest.newBuilder();
+    if (METALOG.isDebugEnabled()) {
+      METALOG.debug(mutationsToString(mutations));
+    }
     for (Mutation mutation : mutations) {
       if (mutation instanceof Put) {
         mmrBuilder.addMutationRequest(ProtobufUtil.toMutation(
@@ -1736,13 +1760,16 @@ public class MetaTableAccessor {
    *
    * @param connection connection we're using
    * @param regionInfo region to update location of
+   * @param openSeqNum the latest sequence number obtained when the region was open
    * @param sn Server name
+   * @param masterSystemTime wall clock time from master if passed in the open region RPC or -1
    * @throws IOException
    */
   public static void updateRegionLocation(Connection connection,
-                                          HRegionInfo regionInfo, ServerName sn, long updateSeqNum)
+                                          HRegionInfo regionInfo, ServerName sn, long openSeqNum,
+                                          long masterSystemTime)
     throws IOException {
-    updateLocation(connection, regionInfo, sn, updateSeqNum);
+    updateLocation(connection, regionInfo, sn, openSeqNum, masterSystemTime);
   }
 
   /**
@@ -1755,16 +1782,21 @@ public class MetaTableAccessor {
    * @param regionInfo region to update location of
    * @param sn Server name
    * @param openSeqNum the latest sequence number obtained when the region was open
+   * @param masterSystemTime wall clock time from master if passed in the open region RPC or -1
    * @throws IOException In particular could throw {@link java.net.ConnectException}
    * if the server is down on other end.
    */
   private static void updateLocation(final Connection connection,
-                                     HRegionInfo regionInfo, ServerName sn, long openSeqNum)
+                                     HRegionInfo regionInfo, ServerName sn, long openSeqNum,
+                                     long masterSystemTime)
     throws IOException {
+
+    // use the maximum of what master passed us vs local time.
+    long time = Math.max(EnvironmentEdgeManager.currentTime(), masterSystemTime);
+
     // region replicas are kept in the primary region's row
-    long time = EnvironmentEdgeManager.currentTime();
     Put put = new Put(getMetaKeyForRegion(regionInfo), time);
-    addLocation(put, sn, openSeqNum, regionInfo.getReplicaId());
+    addLocation(put, sn, openSeqNum, time, regionInfo.getReplicaId());
     putToMetaTable(connection, put);
     LOG.info("Updated row " + regionInfo.getRegionNameAsString() +
       " with server=" + sn);
@@ -1794,11 +1826,20 @@ public class MetaTableAccessor {
    */
   public static void deleteRegions(Connection connection,
                                    List<HRegionInfo> regionsInfo) throws IOException {
+    deleteRegions(connection, regionsInfo, EnvironmentEdgeManager.currentTime());
+  }
+  /**
+   * Deletes the specified regions from META.
+   * @param connection connection we're using
+   * @param regionsInfo list of regions to be deleted from META
+   * @throws IOException
+   */
+  public static void deleteRegions(Connection connection,
+                                   List<HRegionInfo> regionsInfo, long ts) throws IOException {
     List<Delete> deletes = new ArrayList<Delete>(regionsInfo.size());
-    long time = EnvironmentEdgeManager.currentTime();
     for (HRegionInfo hri: regionsInfo) {
       Delete e = new Delete(hri.getRegionName());
-      e.addFamily(getCatalogFamily(), time);
+      e.addFamily(getCatalogFamily(), ts);
       deletes.add(e);
     }
     deleteFromMetaTable(connection, deletes);
@@ -1844,13 +1885,16 @@ public class MetaTableAccessor {
    */
   public static void overwriteRegions(Connection connection,
       List<HRegionInfo> regionInfos, int regionReplication) throws IOException {
-    deleteRegions(connection, regionInfos);
+    // use master time for delete marker and the Put
+    long now = EnvironmentEdgeManager.currentTime();
+    deleteRegions(connection, regionInfos, now);
     // Why sleep? This is the easiest way to ensure that the previous deletes does not
     // eclipse the following puts, that might happen in the same ts from the server.
     // See HBASE-9906, and HBASE-9879. Once either HBASE-9879, HBASE-8770 is fixed,
     // or HBASE-9905 is fixed and meta uses seqIds, we do not need the sleep.
-    Threads.sleep(20);
-    addRegionsToMeta(connection, regionInfos, regionReplication);
+    //
+    // HBASE-13875 uses master timestamp for the mutations. The 20ms sleep is not needed
+    addRegionsToMeta(connection, regionInfos, regionReplication, now+1);
     LOG.info("Overwritten " + regionInfos);
   }
 
@@ -1880,15 +1924,16 @@ public class MetaTableAccessor {
     return p;
   }
 
-  public static Put addLocation(final Put p, final ServerName sn, long openSeqNum, int replicaId){
-    // using regionserver's local time as the timestamp of Put.
-    // See: HBASE-11536
-    long now = EnvironmentEdgeManager.currentTime();
-    p.addImmutable(getCatalogFamily(), getServerColumn(replicaId), now,
+  public static Put addLocation(final Put p, final ServerName sn, long openSeqNum,
+      long time, int replicaId){
+    if (time <= 0) {
+      time = EnvironmentEdgeManager.currentTime();
+    }
+    p.addImmutable(getCatalogFamily(), getServerColumn(replicaId), time,
       Bytes.toBytes(sn.getHostAndPort()));
-    p.addImmutable(getCatalogFamily(), getStartCodeColumn(replicaId), now,
+    p.addImmutable(getCatalogFamily(), getStartCodeColumn(replicaId), time,
       Bytes.toBytes(sn.getStartcode()));
-    p.addImmutable(getCatalogFamily(), getSeqNumColumn(replicaId), now,
+    p.addImmutable(getCatalogFamily(), getSeqNumColumn(replicaId), time,
       Bytes.toBytes(openSeqNum));
     return p;
   }
@@ -1899,5 +1944,29 @@ public class MetaTableAccessor {
     p.addImmutable(getCatalogFamily(), getStartCodeColumn(replicaId), now, null);
     p.addImmutable(getCatalogFamily(), getSeqNumColumn(replicaId), now, null);
     return p;
+  }
+
+  private static String mutationsToString(Mutation ... mutations) throws IOException {
+    StringBuilder sb = new StringBuilder();
+    String prefix = "";
+    for (Mutation mutation : mutations) {
+      sb.append(prefix).append(mutationToString(mutation));
+      prefix = ", ";
+    }
+    return sb.toString();
+  }
+
+  private static String mutationsToString(List<? extends Mutation> mutations) throws IOException {
+    StringBuilder sb = new StringBuilder();
+    String prefix = "";
+    for (Mutation mutation : mutations) {
+      sb.append(prefix).append(mutationToString(mutation));
+      prefix = ", ";
+    }
+    return sb.toString();
+  }
+
+  private static String mutationToString(Mutation p) throws IOException {
+    return p.getClass().getSimpleName() + p.toJSON();
   }
 }

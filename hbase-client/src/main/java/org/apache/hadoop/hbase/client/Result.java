@@ -31,6 +31,7 @@ import java.util.NavigableMap;
 import java.util.TreeMap;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellScannable;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
@@ -102,7 +103,7 @@ public class Result implements CellScannable, CellScanner {
 
   private static ThreadLocal<byte[]> localBuffer = new ThreadLocal<byte[]>();
   private static final int PAD_WIDTH = 128;
-  public static final Result EMPTY_RESULT = new Result();
+  public static final Result EMPTY_RESULT = new Result(true);
 
   private final static int INITIAL_CELLSCANNER_INDEX = -1;
 
@@ -112,6 +113,8 @@ public class Result implements CellScannable, CellScanner {
   private int cellScannerIndex = INITIAL_CELLSCANNER_INDEX;
   private ClientProtos.RegionLoadStats stats;
 
+  private final boolean readonly;
+
   /**
    * Creates an empty Result w/ no KeyValue payload; returns null if you call {@link #rawCells()}.
    * Use this to represent no results if {@code null} won't do or in old 'mapred' as opposed
@@ -119,7 +122,16 @@ public class Result implements CellScannable, CellScanner {
    * {@link #copyFrom(Result)} call.
    */
   public Result() {
-    super();
+    this(false);
+  }
+
+  /**
+   * Allows to construct special purpose immutable Result objects,
+   * such as EMPTY_RESULT.
+   * @param readonly whether this Result instance is readonly
+   */
+  private Result(boolean readonly) {
+    this.readonly = readonly;
   }
 
   /**
@@ -172,6 +184,7 @@ public class Result implements CellScannable, CellScanner {
     this.exists = exists;
     this.stale = stale;
     this.partial = partial;
+    this.readonly = false;
   }
 
   /**
@@ -191,15 +204,15 @@ public class Result implements CellScannable, CellScanner {
   /**
    * Return the array of Cells backing this Result instance.
    *
-   * The array is sorted from smallest -> largest using the
-   * {@link KeyValue#COMPARATOR}.
+   * The array is sorted from smallest -&gt; largest using the
+   * {@link CellComparator#COMPARATOR}.
    *
    * The array only contains what your Get or Scan specifies and no more.
    * For example if you request column "A" 1 version you will have at most 1
    * Cell in the array. If you request column "A" with 2 version you will
    * have at most 2 Cells, with the first one being the newer timestamp and
    * the second being the older timestamp (this is the sort order defined by
-   * {@link KeyValue#COMPARATOR}).  If columns don't exist, they won't be
+   * {@link CellComparator#COMPARATOR}).  If columns don't exist, they won't be
    * present in the result. Therefore if you ask for 1 version all columns,
    * it is safe to iterate over this array and expect to see 1 Cell for
    * each column and no more.
@@ -225,7 +238,7 @@ public class Result implements CellScannable, CellScanner {
 
   /**
    * Return the Cells for the specific column.  The Cells are sorted in
-   * the {@link KeyValue#COMPARATOR} order.  That implies the first entry in
+   * the {@link CellComparator#COMPARATOR} order.  That implies the first entry in
    * the list is the most recent column.  If the query (Scan or Get) only
    * requested 1 version the list will contain at most 1 entry.  If the column
    * did not exist in the result set (either the column does not exist
@@ -270,7 +283,7 @@ public class Result implements CellScannable, CellScanner {
             family, qualifier);
 
     // pos === ( -(insertion point) - 1)
-    int pos = Arrays.binarySearch(kvs, searchTerm, KeyValue.COMPARATOR);
+    int pos = Arrays.binarySearch(kvs, searchTerm, CellComparator.COMPARATOR);
     // never will exact match
     if (pos < 0) {
       pos = (pos+1) * -1;
@@ -315,7 +328,7 @@ public class Result implements CellScannable, CellScanner {
         qualifier, qoffset, qlength);
 
     // pos === ( -(insertion point) - 1)
-    int pos = Arrays.binarySearch(kvs, searchTerm, KeyValue.COMPARATOR);
+    int pos = Arrays.binarySearch(kvs, searchTerm, CellComparator.COMPARATOR);
     // never will exact match
     if (pos < 0) {
       pos = (pos+1) * -1;
@@ -588,7 +601,7 @@ public class Result implements CellScannable, CellScanner {
    * Map of families to all versions of its qualifiers and values.
    * <p>
    * Returns a three level Map of the form:
-   * <code>Map&amp;family,Map&lt;qualifier,Map&lt;timestamp,value>>></code>
+   * <code>Map&amp;family,Map&lt;qualifier,Map&lt;timestamp,value&gt;&gt;&gt;</code>
    * <p>
    * Note: All other map returning methods make use of this map internally.
    * @return map from families to qualifiers to versions
@@ -630,7 +643,7 @@ public class Result implements CellScannable, CellScanner {
   /**
    * Map of families to their most recent qualifiers and values.
    * <p>
-   * Returns a two level Map of the form: <code>Map&amp;family,Map&lt;qualifier,value>></code>
+   * Returns a two level Map of the form: <code>Map&amp;family,Map&lt;qualifier,value&gt;&gt;</code>
    * <p>
    * The most recent version of each qualifier will be used.
    * @return map from families to qualifiers and value
@@ -662,7 +675,7 @@ public class Result implements CellScannable, CellScanner {
   /**
    * Map of qualifiers to values.
    * <p>
-   * Returns a Map of the form: <code>Map&lt;qualifier,value></code>
+   * Returns a Map of the form: <code>Map&lt;qualifier,value&gt;</code>
    * @param family column family to get
    * @return map of qualifiers to values
    */
@@ -834,9 +847,12 @@ public class Result implements CellScannable, CellScanner {
 
   /**
    * Copy another Result into this one. Needed for the old Mapred framework
+   * @throws UnsupportedOperationException if invoked on instance of EMPTY_RESULT
+   * (which is supposed to be immutable).
    * @param other
    */
   public void copyFrom(Result other) {
+    checkReadonly();
     this.row = null;
     this.familyMap = null;
     this.cells = other.cells;
@@ -866,6 +882,7 @@ public class Result implements CellScannable, CellScanner {
   }
 
   public void setExists(Boolean exists) {
+    checkReadonly();
     this.exists = exists;
   }
 
@@ -891,8 +908,23 @@ public class Result implements CellScannable, CellScanner {
   /**
    * Add load information about the region to the information about the result
    * @param loadStats statistics about the current region from which this was returned
+   * @deprecated use {@link #setStatistics(ClientProtos.RegionLoadStats)} instead
+   * @throws UnsupportedOperationException if invoked on instance of EMPTY_RESULT
+   * (which is supposed to be immutable).
    */
+  @InterfaceAudience.Private
+  @Deprecated
   public void addResults(ClientProtos.RegionLoadStats loadStats) {
+    checkReadonly();
+    this.stats = loadStats;
+  }
+
+  /**
+   * Set load information about the region to the information about the result
+   * @param loadStats statistics about the current region from which this was returned
+   */
+  @InterfaceAudience.Private
+  public void setStatistics(ClientProtos.RegionLoadStats loadStats) {
     this.stats = loadStats;
   }
 
@@ -902,5 +934,15 @@ public class Result implements CellScannable, CellScanner {
    */
   public ClientProtos.RegionLoadStats getStats() {
     return stats;
+  }
+
+  /**
+   * All methods modifying state of Result object must call this method
+   * to ensure that special purpose immutable Results can't be accidentally modified.
+   */
+  private void checkReadonly() {
+    if (readonly == true) {
+      throw new UnsupportedOperationException("Attempting to modify readonly EMPTY_RESULT!");
+    }
   }
 }

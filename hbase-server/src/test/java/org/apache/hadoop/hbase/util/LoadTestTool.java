@@ -43,9 +43,9 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Durability;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.crypto.Cipher;
 import org.apache.hadoop.hbase.io.crypto.Encryption;
@@ -266,45 +266,48 @@ public class LoadTestTool extends AbstractHBaseTool {
    */
   protected void applyColumnFamilyOptions(TableName tableName,
       byte[][] columnFamilies) throws IOException {
-    Admin admin = new HBaseAdmin(conf);
-    HTableDescriptor tableDesc = admin.getTableDescriptor(tableName);
-    LOG.info("Disabling table " + tableName);
-    admin.disableTable(tableName);
-    for (byte[] cf : columnFamilies) {
-      HColumnDescriptor columnDesc = tableDesc.getFamily(cf);
-      boolean isNewCf = columnDesc == null;
-      if (isNewCf) {
-        columnDesc = new HColumnDescriptor(cf);
+    try (Connection conn = ConnectionFactory.createConnection(conf);
+        Admin admin = conn.getAdmin()) {
+      HTableDescriptor tableDesc = admin.getTableDescriptor(tableName);
+      LOG.info("Disabling table " + tableName);
+      admin.disableTable(tableName);
+      for (byte[] cf : columnFamilies) {
+        HColumnDescriptor columnDesc = tableDesc.getFamily(cf);
+        boolean isNewCf = columnDesc == null;
+        if (isNewCf) {
+          columnDesc = new HColumnDescriptor(cf);
+        }
+        if (bloomType != null) {
+          columnDesc.setBloomFilterType(bloomType);
+        }
+        if (compressAlgo != null) {
+          columnDesc.setCompressionType(compressAlgo);
+        }
+        if (dataBlockEncodingAlgo != null) {
+          columnDesc.setDataBlockEncoding(dataBlockEncodingAlgo);
+        }
+        if (inMemoryCF) {
+          columnDesc.setInMemory(inMemoryCF);
+        }
+        if (cipher != null) {
+          byte[] keyBytes = new byte[cipher.getKeyLength()];
+          new SecureRandom().nextBytes(keyBytes);
+          columnDesc.setEncryptionType(cipher.getName());
+          columnDesc.setEncryptionKey(
+              EncryptionUtil.wrapKey(conf,
+                  User.getCurrent().getShortName(),
+                  new SecretKeySpec(keyBytes,
+                      cipher.getName())));
+        }
+        if (isNewCf) {
+          admin.addColumnFamily(tableName, columnDesc);
+        } else {
+          admin.modifyColumnFamily(tableName, columnDesc);
+        }
       }
-      if (bloomType != null) {
-        columnDesc.setBloomFilterType(bloomType);
-      }
-      if (compressAlgo != null) {
-        columnDesc.setCompressionType(compressAlgo);
-      }
-      if (dataBlockEncodingAlgo != null) {
-        columnDesc.setDataBlockEncoding(dataBlockEncodingAlgo);
-      }
-      if (inMemoryCF) {
-        columnDesc.setInMemory(inMemoryCF);
-      }
-      if (cipher != null) {
-        byte[] keyBytes = new byte[cipher.getKeyLength()];
-        new SecureRandom().nextBytes(keyBytes);
-        columnDesc.setEncryptionType(cipher.getName());
-        columnDesc.setEncryptionKey(EncryptionUtil.wrapKey(conf,
-          User.getCurrent().getShortName(),
-          new SecretKeySpec(keyBytes, cipher.getName())));
-      }
-      if (isNewCf) {
-        admin.addColumn(tableName, columnDesc);
-      } else {
-        admin.modifyColumn(tableName, columnDesc);
-      }
+      LOG.info("Enabling table " + tableName);
+      admin.enableTable(tableName);
     }
-    LOG.info("Enabling table " + tableName);
-    admin.enableTable(tableName);
-    admin.close();
   }
 
   @Override
@@ -914,7 +917,7 @@ public class LoadTestTool extends AbstractHBaseTool {
 
   private void addAuthInfoToConf(Properties authConfig, Configuration conf, String owner,
       String userList) throws IOException {
-    List<String> users = Arrays.asList(userList.split(","));
+    List<String> users = new ArrayList(Arrays.asList(userList.split(",")));
     users.add(owner);
     for (String user : users) {
       String keyTabFileConfKey = "hbase." + user + ".keytab.file";

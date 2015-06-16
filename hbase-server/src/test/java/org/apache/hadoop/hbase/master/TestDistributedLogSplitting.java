@@ -90,6 +90,7 @@ import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.GetRegionInfoResponse.CompactionState;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -167,6 +168,7 @@ public class TestDistributedLogSplitting {
     conf.setInt(HConstants.REGIONSERVER_INFO_PORT, -1);
     conf.setFloat(HConstants.LOAD_BALANCER_SLOP_KEY, (float) 100.0); // no load balancing
     conf.setInt("hbase.regionserver.wal.max.splitters", 3);
+    conf.setInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT, 40);
     TEST_UTIL.shutdownMiniHBaseCluster();
     TEST_UTIL = new HBaseTestingUtility(conf);
     TEST_UTIL.setDFSCluster(dfsCluster);
@@ -1257,7 +1259,7 @@ public class TestDistributedLogSplitting {
     byte[] family = Bytes.toBytes("family");
     byte[] qualifier = Bytes.toBytes("c1");
     long timeStamp = System.currentTimeMillis();
-    HTableDescriptor htd = new HTableDescriptor();
+    HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(new HColumnDescriptor(family));
     final WAL wal = hrs.getWAL(curRegionInfo);
     for (int i = 0; i < NUM_LOG_LINES; i += 1) {
@@ -1479,7 +1481,7 @@ public class TestDistributedLogSplitting {
         }
         LOG.debug("adding data to rs = " + rst.getName() +
             " region = "+ hri.getRegionNameAsString());
-        HRegion region = hrs.getOnlineRegion(hri.getRegionName());
+        Region region = hrs.getOnlineRegion(hri.getRegionName());
         assertTrue(region != null);
         putData(region, hri.getStartKey(), nrows, Bytes.toBytes("q"), family);
       }
@@ -1500,7 +1502,7 @@ public class TestDistributedLogSplitting {
         }
         LOG.debug("adding data to rs = " + mt.getName() +
             " region = "+ hri.getRegionNameAsString());
-        HRegion region = hrs.getOnlineRegion(hri.getRegionName());
+        Region region = hrs.getOnlineRegion(hri.getRegionName());
         assertTrue(region != null);
         putData(region, hri.getStartKey(), nrows, Bytes.toBytes("q"), family);
       }
@@ -1614,7 +1616,7 @@ public class TestDistributedLogSplitting {
     TEST_UTIL.waitUntilNoRegionsInTransition(60000);
   }
 
-  private void putData(HRegion region, byte[] startRow, int numRows, byte [] qf,
+  private void putData(Region region, byte[] startRow, int numRows, byte [] qf,
       byte [] ...families)
   throws IOException {
     for(int i = 0; i < numRows; i++) {
@@ -1748,5 +1750,4 @@ public class TestDistributedLogSplitting {
 
     return hrs;
   }
-
 }

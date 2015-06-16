@@ -35,10 +35,9 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -107,10 +106,8 @@ public class TestScannerSelectionUsingTTL {
     HTableDescriptor htd = new HTableDescriptor(TABLE);
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(TABLE);
-    HRegion region =
-        HBaseTestingUtility.createRegionAndWAL(info,
-            TEST_UTIL.getDataTestDir(info.getEncodedName()),
-            conf, htd);
+    Region region = HBaseTestingUtility.createRegionAndWAL(info,
+      TEST_UTIL.getDataTestDir(info.getEncodedName()), conf, htd);
 
     long ts = EnvironmentEdgeManager.currentTime();
     long version = 0; //make sure each new set of Put's have a new ts
@@ -128,7 +125,7 @@ public class TestScannerSelectionUsingTTL {
         }
         region.put(put);
       }
-      region.flushcache();
+      region.flush(true);
       version++;
     }
 
@@ -142,7 +139,7 @@ public class TestScannerSelectionUsingTTL {
     final int expectedKVsPerRow = numFreshFiles * NUM_COLS_PER_ROW;
     int numReturnedRows = 0;
     LOG.info("Scanning the entire table");
-    while (NextState.hasMoreValues(scanner.next(results)) || results.size() > 0) {
+    while (scanner.next(results) || results.size() > 0) {
       assertEquals(expectedKVsPerRow, results.size());
       ++numReturnedRows;
       results.clear();
@@ -156,7 +153,7 @@ public class TestScannerSelectionUsingTTL {
       HStore store = (HStore)region.getStore(FAMILY_BYTES);
       store.compactRecentForTestingAssumingDefaultPolicy(totalNumFiles);
     } else {
-      region.compactStores();
+      region.compact(false);
     }
 
     HBaseTestingUtility.closeRegionAndWAL(region);

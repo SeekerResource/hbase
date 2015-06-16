@@ -35,16 +35,16 @@ import org.apache.zookeeper.KeeperException;
  * A cluster registry that stores to zookeeper.
  */
 class ZooKeeperRegistry implements Registry {
-  static final Log LOG = LogFactory.getLog(ZooKeeperRegistry.class);
+  private static final Log LOG = LogFactory.getLog(ZooKeeperRegistry.class);
   // Needs an instance of hci to function.  Set after construct this instance.
-  ConnectionManager.HConnectionImplementation hci;
+  ConnectionImplementation hci;
 
   @Override
   public void init(Connection connection) {
-    if (!(connection instanceof ConnectionManager.HConnectionImplementation)) {
-      throw new RuntimeException("This registry depends on HConnectionImplementation");
+    if (!(connection instanceof ConnectionImplementation)) {
+      throw new RuntimeException("This registry depends on ConnectionImplementation");
     }
-    this.hci = (ConnectionManager.HConnectionImplementation)connection;
+    this.hci = (ConnectionImplementation)connection;
   }
 
   @Override

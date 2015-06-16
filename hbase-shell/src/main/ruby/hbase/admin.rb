@@ -115,6 +115,13 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
+    # Query the current state of the LoadBalancer.
+    # Returns the balancer's state (true is enabled).
+    def balancer_enabled?()
+      @admin.isBalancerEnabled()
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Request a scan of the catalog table (for garbage collection)
     # Returns an int signifying the number of entries cleaned
     def catalogjanitor_run()
@@ -511,10 +518,19 @@ module Hbase
           # Unset table attributes
           elsif method == "table_att_unset"
             raise(ArgumentError, "NAME parameter missing for table_att_unset method") unless name
-            if (htd.getValue(name) == nil)
-              raise ArgumentError, "Can not find attribute: #{name}"
+            if name.kind_of?(Array)
+              name.each do |key|
+                if (htd.getValue(key) == nil)
+                  raise ArgumentError, "Could not find attribute: #{key}"
+                end
+                htd.remove(key)
+              end
+            else
+              if (htd.getValue(name) == nil)
+                raise ArgumentError, "Could not find attribute: #{name}"
+              end
+              htd.remove(name)
             end
-            htd.remove(name)
             @admin.modifyTable(table_name.to_java_bytes, htd)
           # Unknown method
           else
@@ -631,7 +647,7 @@ module Hbase
             puts("            %s" % [ region.toString() ])
           end
         end
-        puts("%d dead servers" % [ status.getDeadServers() ])
+        puts("%d dead servers" % [ status.getDeadServersSize() ])
         for server in status.getDeadServerNames()
           puts("    %s" % [ server ])
         end

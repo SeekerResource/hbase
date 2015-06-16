@@ -33,9 +33,8 @@ import org.apache.hadoop.hbase.coprocessor.protobuf.generated.ColumnAggregationW
 import org.apache.hadoop.hbase.coprocessor.protobuf.generated.ColumnAggregationWithNullResponseProtos.SumRequest;
 import org.apache.hadoop.hbase.coprocessor.protobuf.generated.ColumnAggregationWithNullResponseProtos.SumResponse;
 import org.apache.hadoop.hbase.protobuf.ResponseConverter;
-import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.util.Bytes;
 
 import com.google.protobuf.RpcCallback;
@@ -51,7 +50,7 @@ public class ColumnAggregationEndpointNullResponse
     extends
     ColumnAggregationServiceNullResponse
 implements Coprocessor, CoprocessorService  {
-  static final Log LOG = LogFactory.getLog(ColumnAggregationEndpointNullResponse.class);
+  private static final Log LOG = LogFactory.getLog(ColumnAggregationEndpointNullResponse.class);
   private RegionCoprocessorEnvironment env = null;
   @Override
   public Service getService() {
@@ -87,9 +86,9 @@ implements Coprocessor, CoprocessorService  {
     int sumResult = 0;
     InternalScanner scanner = null;
     try {
-      HRegion region = this.env.getRegion();
+      Region region = this.env.getRegion();
       // for the last region in the table, return null to test null handling
-      if (Bytes.equals(region.getEndKey(), HConstants.EMPTY_END_ROW)) {
+      if (Bytes.equals(region.getRegionInfo().getEndKey(), HConstants.EMPTY_END_ROW)) {
         done.run(null);
         return;
       }
@@ -98,7 +97,7 @@ implements Coprocessor, CoprocessorService  {
       boolean hasMore = false;
       do {
         curVals.clear();
-        hasMore = NextState.hasMoreValues(scanner.next(curVals));
+        hasMore = scanner.next(curVals);
         for (Cell kv : curVals) {
           if (CellUtil.matchingQualifier(kv, qualifier)) {
             sumResult += Bytes.toInt(kv.getValueArray(), kv.getValueOffset());
@@ -123,6 +122,6 @@ implements Coprocessor, CoprocessorService  {
     }
     done.run(SumResponse.newBuilder().setSum(sumResult).build());
     LOG.info("Returning sum " + sumResult + " for region " +
-        Bytes.toStringBinary(env.getRegion().getRegionName()));
+        Bytes.toStringBinary(env.getRegion().getRegionInfo().getRegionName()));
   }
 }

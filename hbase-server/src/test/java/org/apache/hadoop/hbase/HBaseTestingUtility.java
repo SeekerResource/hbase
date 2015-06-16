@@ -90,6 +90,7 @@ import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.RegionServerStoppedException;
 import org.apache.hadoop.hbase.regionserver.wal.MetricsWAL;
@@ -284,6 +285,13 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     htu.getConfiguration().set(HConstants.HBASE_DIR, dataTestDir);
     LOG.debug("Setting " + HConstants.HBASE_DIR + " to " + dataTestDir);
     return htu;
+  }
+
+  /**
+   * Close both the region {@code r} and it's underlying WAL. For use in tests.
+   */
+  public static void closeRegionAndWAL(final Region r) throws IOException {
+    closeRegionAndWAL((HRegion)r);
   }
 
   /**
@@ -575,8 +583,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       true, null, null, hosts, null);
 
     // Set this just-started cluster as our filesystem.
-    FileSystem fs = this.dfsCluster.getFileSystem();
-    FSUtils.setFsDefault(this.conf, new Path(fs.getUri()));
+    setFs();
 
     // Wait for the cluster to be totally up
     this.dfsCluster.waitClusterUp();
@@ -587,6 +594,14 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return this.dfsCluster;
   }
 
+  private void setFs() throws IOException {
+    if(this.dfsCluster == null){
+      LOG.info("Skipping setting fs because dfsCluster is null");
+      return;
+    }
+    FileSystem fs = this.dfsCluster.getFileSystem();
+    FSUtils.setFsDefault(this.conf, new Path(fs.getUri()));
+  }
 
   public MiniDFSCluster startMiniDFSCluster(int servers, final  String racks[], String hosts[])
       throws Exception {
@@ -957,7 +972,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
     // Bring up mini dfs cluster. This spews a bunch of warnings about missing
     // scheme. Complaints are 'Scheme is undefined for build/test/data/dfs/name1'.
-    startMiniDFSCluster(numDataNodes, dataNodeHosts);
+    if(this.dfsCluster == null) {
+      dfsCluster = startMiniDFSCluster(numDataNodes, dataNodeHosts);
+    }
 
     // Start up a zk cluster.
     if (this.zkCluster == null) {
@@ -1018,6 +1035,11 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
     getHBaseAdmin(); // create immediately the hbaseAdmin
     LOG.info("Minicluster is up");
+
+    // Set the hbase.fs.tmp.dir config to make sure that we have some default value. This is
+    // for tests that do not read hbase-defaults.xml
+    setHBaseFsTmpDir();
+
     return (MiniHBaseCluster)this.hbaseCluster;
   }
 
@@ -1034,7 +1056,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
     this.hbaseCluster = new MiniHBaseCluster(this.conf, servers);
     // Don't leave here till we've done a successful scan of the hbase:meta
-    Table t = new HTable(new Configuration(this.conf), TableName.META_TABLE_NAME);
+    Connection conn = ConnectionFactory.createConnection(this.conf);
+    Table t = conn.getTable(TableName.META_TABLE_NAME);
     ResultScanner s = t.getScanner(new Scan());
     while (s.next() != null) {
       // do nothing
@@ -1042,6 +1065,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     LOG.info("HBase has been restarted");
     s.close();
     t.close();
+    conn.close();
   }
 
   /**
@@ -1175,6 +1199,17 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    */
   public Path createRootDir() throws IOException {
     return createRootDir(false);
+  }
+
+
+  private void setHBaseFsTmpDir() throws IOException {
+    String hbaseFsTmpDirInString = this.conf.get("hbase.fs.tmp.dir");
+    if (hbaseFsTmpDirInString == null) {
+      this.conf.set("hbase.fs.tmp.dir",  getDataTestDirOnTestFS("hbase-staging").toString());
+      LOG.info("Setting hbase.fs.tmp.dir to " + this.conf.get("hbase.fs.tmp.dir"));
+    } else {
+      LOG.info("The hbase.fs.tmp.dir is set to " + hbaseFsTmpDirInString);
+    }
   }
 
   /**
@@ -2129,6 +2164,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return loadRegion(r, f, false);
   }
 
+  public int loadRegion(final Region r, final byte[] f) throws IOException {
+    return loadRegion((HRegion)r, f);
+  }
+
   /**
    * Load region with rows from 'aaa' to 'zzz'.
    * @param r Region
@@ -2150,8 +2189,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
           Put put = new Put(k);
           put.setDurability(Durability.SKIP_WAL);
           put.add(f, null, k);
-          if (r.getWAL() == null) put.setDurability(Durability.SKIP_WAL);
-
+          if (r.getWAL() == null) {
+            put.setDurability(Durability.SKIP_WAL);
+          }
           int preRowCount = rowCount;
           int pause = 10;
           int maxPause = 1000;
@@ -2167,7 +2207,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
         }
       }
       if (flush) {
-        r.flushcache();
+        r.flush(true);
       }
     }
     return rowCount;
@@ -2202,9 +2242,19 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
   }
 
+  public void verifyNumericRows(Region region, final byte[] f, int startRow, int endRow)
+      throws IOException {
+    verifyNumericRows((HRegion)region, f, startRow, endRow);
+  }
+
   public void verifyNumericRows(HRegion region, final byte[] f, int startRow, int endRow)
       throws IOException {
     verifyNumericRows(region, f, startRow, endRow, true);
+  }
+
+  public void verifyNumericRows(Region region, final byte[] f, int startRow, int endRow,
+      final boolean present) throws IOException {
+    verifyNumericRows((HRegion)region, f, startRow, endRow, present);
   }
 
   public void verifyNumericRows(HRegion region, final byte[] f, int startRow, int endRow,
@@ -2263,6 +2313,18 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
     results.close();
     return count;
+  }
+
+  /**
+   * Return the number of rows in the given table.
+   */
+  public int countRows(final TableName tableName) throws IOException {
+    Table table = getConnection().getTable(tableName);
+    try {
+      return countRows(table);
+    } finally {
+      table.close();
+    }
   }
 
   /**
@@ -2929,11 +2991,25 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return dfsCluster;
   }
 
-  public void setDFSCluster(MiniDFSCluster cluster) throws IOException {
-    if (dfsCluster != null && dfsCluster.isClusterUp()) {
-      throw new IOException("DFSCluster is already running! Shut it down first.");
+  public void setDFSCluster(MiniDFSCluster cluster) throws IllegalStateException, IOException {
+    setDFSCluster(cluster, true);
+  }
+
+  /**
+   * Set the MiniDFSCluster
+   * @param cluster cluster to use
+   * @param requireDown require the that cluster not be "up" (MiniDFSCluster#isClusterUp) before
+   * it is set.
+   * @throws IllegalStateException if the passed cluster is up when it is required to be down
+   * @throws IOException if the FileSystem could not be set from the passed dfs cluster
+   */
+  public void setDFSCluster(MiniDFSCluster cluster, boolean requireDown)
+      throws IllegalStateException, IOException {
+    if (dfsCluster != null && requireDown && dfsCluster.isClusterUp()) {
+      throw new IllegalStateException("DFSCluster is already running! Shut it down first.");
     }
     this.dfsCluster = cluster;
+    this.setFs();
   }
 
   public FileSystem getTestFileSystem() throws IOException {
@@ -3401,7 +3477,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
     int i;
     for (i = 0; i < minLen
-        && KeyValue.COMPARATOR.compare(expected.get(i), actual.get(i)) == 0;
+        && CellComparator.COMPARATOR.compare(expected.get(i), actual.get(i)) == 0;
         ++i) {}
 
     if (additionalMsg == null) {
@@ -3753,10 +3829,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
           if (server.equals(rs.getServerName())) {
             continue;
           }
-          Collection<HRegion> hrs = rs.getOnlineRegionsLocalContext();
-          for (HRegion r: hrs) {
+          Collection<Region> hrs = rs.getOnlineRegionsLocalContext();
+          for (Region r: hrs) {
             assertTrue("Region should not be double assigned",
-              r.getRegionId() != hri.getRegionId());
+              r.getRegionInfo().getRegionId() != hri.getRegionId());
           }
         }
         return; // good, we are happy

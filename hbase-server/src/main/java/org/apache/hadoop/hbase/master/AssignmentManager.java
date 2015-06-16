@@ -46,6 +46,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.CoordinatedStateException;
 import org.apache.hadoop.hbase.HBaseIOException;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -156,6 +157,7 @@ public class AssignmentManager {
   // bulk assigning may be not as efficient.
   private final int bulkAssignThresholdRegions;
   private final int bulkAssignThresholdServers;
+  private final int bulkPerRegionOpenTimeGuesstimate;
 
   // Should bulk assignment wait till all regions are assigned,
   // or it is timed out?  This is useful to measure bulk assignment
@@ -194,7 +196,7 @@ public class AssignmentManager {
 
   /** Listeners that are called on assignment events. */
   private List<AssignmentListener> listeners = new CopyOnWriteArrayList<AssignmentListener>();
-  
+
   private RegionStateListener regionStateListener;
 
   /**
@@ -244,6 +246,8 @@ public class AssignmentManager {
       conf.getBoolean("hbase.bulk.assignment.waittillallassigned", false);
     this.bulkAssignThresholdRegions = conf.getInt("hbase.bulk.assignment.threshold.regions", 7);
     this.bulkAssignThresholdServers = conf.getInt("hbase.bulk.assignment.threshold.servers", 3);
+    this.bulkPerRegionOpenTimeGuesstimate =
+      conf.getInt("hbase.bulk.assignment.perregion.open.time", 10000);
 
     this.metricsAssignmentManager = new MetricsAssignmentManager();
     this.tableLockManager = tableLockManager;
@@ -389,9 +393,10 @@ public class AssignmentManager {
    * @throws IOException
    * @throws KeeperException
    * @throws InterruptedException
+   * @throws CoordinatedStateException 
    */
-  void joinCluster() throws IOException,
-          KeeperException, InterruptedException {
+  void joinCluster()
+  throws IOException, KeeperException, InterruptedException, CoordinatedStateException {
     long startTime = System.currentTimeMillis();
     // Concurrency note: In the below the accesses on regionsInTransition are
     // outside of a synchronization block where usually all accesses to RIT are
@@ -407,8 +412,7 @@ public class AssignmentManager {
     Set<ServerName> deadServers = rebuildUserRegions();
 
     // This method will assign all user regions if a clean server startup or
-    // it will reconstruct master state and cleanup any leftovers from
-    // previous master process.
+    // it will reconstruct master state and cleanup any leftovers from previous master process.
     boolean failover = processDeadServersAndRegionsInTransition(deadServers);
 
     recoverTableInDisablingState();
@@ -419,16 +423,17 @@ public class AssignmentManager {
 
   /**
    * Process all regions that are in transition in zookeeper and also
-   * processes the list of dead servers by scanning the META.
+   * processes the list of dead servers.
    * Used by master joining an cluster.  If we figure this is a clean cluster
    * startup, will assign all user regions.
-   * @param deadServers
-   *          Map of dead servers and their regions. Can be null.
+   * @param deadServers Set of servers that are offline probably legitimately that were carrying
+   * regions according to a scan of hbase:meta. Can be null.
    * @throws IOException
    * @throws InterruptedException
    */
   boolean processDeadServersAndRegionsInTransition(final Set<ServerName> deadServers)
-          throws IOException, InterruptedException {
+  throws KeeperException, IOException, InterruptedException, CoordinatedStateException {
+    // TODO Needed? List<String> nodes = ZKUtil.listChildrenNoWatch(watcher, watcher.assignmentZNode);
     boolean failover = !serverManager.getDeadServers().isEmpty();
     if (failover) {
       // This may not be a failover actually, especially if meta is on this master.
@@ -830,6 +835,18 @@ public class AssignmentManager {
             invokeAssign(region);
           }
         }
+      }
+
+      // wait for assignment completion
+      ArrayList<HRegionInfo> userRegionSet = new ArrayList<HRegionInfo>(regions.size());
+      for (HRegionInfo region: regions) {
+        if (!region.getTable().isSystemTable()) {
+          userRegionSet.add(region);
+        }
+      }
+      if (!waitForAssignment(userRegionSet, true, userRegionSet.size(),
+            System.currentTimeMillis())) {
+        LOG.debug("some user regions are still in transition: " + userRegionSet);
       }
       LOG.debug("Bulk assigning done for " + destination);
       return true;
@@ -1349,22 +1366,62 @@ public class AssignmentManager {
    * If the region is already assigned, returns immediately.  Otherwise, method
    * blocks until the region is assigned.
    * @param regionInfo region to wait on assignment for
+   * @return true if the region is assigned false otherwise.
    * @throws InterruptedException
    */
   public boolean waitForAssignment(HRegionInfo regionInfo)
       throws InterruptedException {
-    while (!regionStates.isRegionOnline(regionInfo)) {
-      if (regionStates.isRegionInState(regionInfo, State.FAILED_OPEN)
-          || this.server.isStopped()) {
-        return false;
-      }
+    ArrayList<HRegionInfo> regionSet = new ArrayList<HRegionInfo>(1);
+    regionSet.add(regionInfo);
+    return waitForAssignment(regionSet, true, Long.MAX_VALUE);
+  }
 
-      // We should receive a notification, but it's
-      //  better to have a timeout to recheck the condition here:
-      //  it lowers the impact of a race condition if any
-      regionStates.waitForUpdate(100);
+  /**
+   * Waits until the specified region has completed assignment, or the deadline is reached.
+   */
+  protected boolean waitForAssignment(final Collection<HRegionInfo> regionSet,
+      final boolean waitTillAllAssigned, final int reassigningRegions,
+      final long minEndTime) throws InterruptedException {
+    long deadline = minEndTime + bulkPerRegionOpenTimeGuesstimate * (reassigningRegions + 1);
+    return waitForAssignment(regionSet, waitTillAllAssigned, deadline);
+  }
+
+  /**
+   * Waits until the specified region has completed assignment, or the deadline is reached.
+   * @param regionSet set of region to wait on. the set is modified and the assigned regions removed
+   * @param waitTillAllAssigned true if we should wait all the regions to be assigned
+   * @param deadline the timestamp after which the wait is aborted
+   * @return true if all the regions are assigned false otherwise.
+   * @throws InterruptedException
+   */
+  protected boolean waitForAssignment(final Collection<HRegionInfo> regionSet,
+      final boolean waitTillAllAssigned, final long deadline) throws InterruptedException {
+    // We're not synchronizing on regionsInTransition now because we don't use any iterator.
+    while (!regionSet.isEmpty() && !server.isStopped() && deadline > System.currentTimeMillis()) {
+      int failedOpenCount = 0;
+      Iterator<HRegionInfo> regionInfoIterator = regionSet.iterator();
+      while (regionInfoIterator.hasNext()) {
+        HRegionInfo hri = regionInfoIterator.next();
+        if (regionStates.isRegionOnline(hri) || regionStates.isRegionInState(hri,
+            State.SPLITTING, State.SPLIT, State.MERGING, State.MERGED)) {
+          regionInfoIterator.remove();
+        } else if (regionStates.isRegionInState(hri, State.FAILED_OPEN)) {
+          failedOpenCount++;
+        }
+      }
+      if (!waitTillAllAssigned) {
+        // No need to wait, let assignment going on asynchronously
+        break;
+      }
+      if (!regionSet.isEmpty()) {
+        if (failedOpenCount == regionSet.size()) {
+          // all the regions we are waiting had an error on open.
+          break;
+        }
+        regionStates.waitForUpdate(100);
+      }
     }
-    return true;
+    return regionSet.isEmpty();
   }
 
   /**
@@ -1428,15 +1485,13 @@ public class AssignmentManager {
     }
 
     // Generate a round-robin bulk assignment plan
-    Map<ServerName, List<HRegionInfo>> bulkPlan
-      = balancer.roundRobinAssignment(regions, servers);
+    Map<ServerName, List<HRegionInfo>> bulkPlan = balancer.roundRobinAssignment(regions, servers);
     if (bulkPlan == null) {
       throw new IOException("Unable to determine a plan to assign region(s)");
     }
 
     processFavoredNodes(regions);
-    assign(regions.size(), servers.size(),
-      "round-robin=true", bulkPlan);
+    assign(regions.size(), servers.size(), "round-robin=true", bulkPlan);
   }
 
   private void assign(int regions, int totalServers,
@@ -1453,14 +1508,26 @@ public class AssignmentManager {
         LOG.trace("Not using bulk assignment since we are assigning only " + regions +
           " region(s) to " + servers + " server(s)");
       }
+
+      // invoke assignment (async)
+      ArrayList<HRegionInfo> userRegionSet = new ArrayList<HRegionInfo>(regions);
       for (Map.Entry<ServerName, List<HRegionInfo>> plan: bulkPlan.entrySet()) {
         if (!assign(plan.getKey(), plan.getValue()) && !server.isStopped()) {
           for (HRegionInfo region: plan.getValue()) {
             if (!regionStates.isRegionOnline(region)) {
               invokeAssign(region);
+              if (!region.getTable().isSystemTable()) {
+                userRegionSet.add(region);
+              }
             }
           }
         }
+      }
+
+      // wait for assignment completion
+      if (!waitForAssignment(userRegionSet, true, userRegionSet.size(),
+            System.currentTimeMillis())) {
+        LOG.debug("some user regions are still in transition: " + userRegionSet);
       }
     } else {
       LOG.info("Bulk assigning " + regions + " region(s) across "
@@ -1540,10 +1607,8 @@ public class AssignmentManager {
 
   /**
    * Rebuild the list of user regions and assignment information.
-   * <p>
-   * Returns a set of servers that are not found to be online that hosted
-   * some regions.
-   * @return set of servers not online that hosted some regions per meta
+   * Updates regionstates with findings as we go through list of regions.
+   * @return set of servers not online that hosted some regions according to a scan of hbase:meta
    * @throws IOException
    */
   Set<ServerName> rebuildUserRegions() throws
@@ -1586,6 +1651,7 @@ public class AssignmentManager {
       HRegionLocation[] locations = rl.getRegionLocations();
       if (locations == null) continue;
       for (HRegionLocation hrl : locations) {
+        if (hrl == null) continue;
         HRegionInfo regionInfo = hrl.getRegionInfo();
         if (regionInfo == null) continue;
         int replicaId = regionInfo.getReplicaId();
@@ -1990,15 +2056,15 @@ public class AssignmentManager {
   }
 
   /**
-   * Process shutdown server removing any assignments.
+   * Clean out crashed server removing any assignments.
    * @param sn Server that went down.
    * @return list of regions in transition on this server
    */
-  public List<HRegionInfo> processServerShutdown(final ServerName sn) {
+  public List<HRegionInfo> cleanOutCrashedServerReferences(final ServerName sn) {
     // Clean out any existing assignment plans for this server
     synchronized (this.regionPlans) {
-      for (Iterator <Map.Entry<String, RegionPlan>> i =
-          this.regionPlans.entrySet().iterator(); i.hasNext();) {
+      for (Iterator <Map.Entry<String, RegionPlan>> i = this.regionPlans.entrySet().iterator();
+          i.hasNext();) {
         Map.Entry<String, RegionPlan> e = i.next();
         ServerName otherSn = e.getValue().getDestination();
         // The name will be null if the region is planned for a random assign.
@@ -2016,8 +2082,7 @@ public class AssignmentManager {
       // We need a lock on the region as we could update it
       Lock lock = locker.acquireLock(encodedName);
       try {
-        RegionState regionState =
-          regionStates.getRegionTransitionState(encodedName);
+        RegionState regionState = regionStates.getRegionTransitionState(encodedName);
         if (regionState == null
             || (regionState.getServerName() != null && !regionState.isOnServer(sn))
             || !RegionStates.isOneOfStates(regionState, State.PENDING_OPEN,
@@ -2046,6 +2111,7 @@ public class AssignmentManager {
    * @param plan Plan to execute.
    */
   public void balance(final RegionPlan plan) {
+
     HRegionInfo hri = plan.getRegionInfo();
     TableName tableName = hri.getTable();
     if (tableStateManager.isTableState(tableName,

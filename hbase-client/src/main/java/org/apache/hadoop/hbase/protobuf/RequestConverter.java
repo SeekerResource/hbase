@@ -60,6 +60,7 @@ import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.SplitRegionRequest
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.StopServerRequest;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.UpdateFavoredNodesRequest;
 import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.UpdateFavoredNodesRequest.RegionUpdateInfo;
+import org.apache.hadoop.hbase.protobuf.generated.AdminProtos.WarmupRegionRequest;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.BulkLoadHFileRequest;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.BulkLoadHFileRequest.FamilyPath;
@@ -91,6 +92,7 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetSchemaAlterSta
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableDescriptorsRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableNamesRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableStateRequest;
+import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsBalancerEnabledRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsCatalogJanitorEnabledRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.IsMasterRunningRequest;
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.ModifyColumnRequest;
@@ -104,6 +106,7 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.UnassignRegionReq
 import org.apache.hadoop.hbase.protobuf.generated.RegionServerStatusProtos.GetLastFlushedSequenceIdRequest;
 import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 
 import com.google.protobuf.ByteString;
@@ -476,9 +479,8 @@ public final class RequestConverter {
    * @return a scan request
    * @throws IOException
    */
-  public static ScanRequest buildScanRequest(final byte[] regionName,
-      final Scan scan, final int numberOfRows,
-        final boolean closeScanner) throws IOException {
+  public static ScanRequest buildScanRequest(final byte[] regionName, final Scan scan,
+      final int numberOfRows, final boolean closeScanner) throws IOException {
     ScanRequest.Builder builder = ScanRequest.newBuilder();
     RegionSpecifier region = buildRegionSpecifier(
       RegionSpecifierType.REGION_NAME, regionName);
@@ -487,6 +489,8 @@ public final class RequestConverter {
     builder.setRegion(region);
     builder.setScan(ProtobufUtil.toScan(scan));
     builder.setClientHandlesPartials(true);
+    builder.setClientHandlesHeartbeats(true);
+    builder.setTrackScanMetrics(scan != null && scan.isScanMetricsEnabled());
     return builder.build();
   }
 
@@ -498,13 +502,15 @@ public final class RequestConverter {
    * @param closeScanner
    * @return a scan request
    */
-  public static ScanRequest buildScanRequest(final long scannerId,
-      final int numberOfRows, final boolean closeScanner) {
+  public static ScanRequest buildScanRequest(final long scannerId, final int numberOfRows,
+      final boolean closeScanner, final boolean trackMetrics) {
     ScanRequest.Builder builder = ScanRequest.newBuilder();
     builder.setNumberOfRows(numberOfRows);
     builder.setCloseScanner(closeScanner);
     builder.setScannerId(scannerId);
     builder.setClientHandlesPartials(true);
+    builder.setClientHandlesHeartbeats(true);
+    builder.setTrackScanMetrics(trackMetrics);
     return builder.build();
   }
 
@@ -518,13 +524,15 @@ public final class RequestConverter {
    * @return a scan request
    */
   public static ScanRequest buildScanRequest(final long scannerId, final int numberOfRows,
-      final boolean closeScanner, final long nextCallSeq) {
+      final boolean closeScanner, final long nextCallSeq, final boolean trackMetrics) {
     ScanRequest.Builder builder = ScanRequest.newBuilder();
     builder.setNumberOfRows(numberOfRows);
     builder.setCloseScanner(closeScanner);
     builder.setScannerId(scannerId);
     builder.setNextCallSeq(nextCallSeq);
     builder.setClientHandlesPartials(true);
+    builder.setClientHandlesHeartbeats(true);
+    builder.setTrackScanMetrics(trackMetrics);
     return builder.build();
   }
 
@@ -780,6 +788,8 @@ public final class RequestConverter {
    if (server != null) {
      builder.setServerStartCode(server.getStartcode());
    }
+   // send the master's wall clock time as well, so that the RS can refer to it
+   builder.setMasterSystemTime(EnvironmentEdgeManager.currentTime());
    return builder.build();
  }
 
@@ -801,6 +811,7 @@ public final class RequestConverter {
    if (server != null) {
      builder.setServerStartCode(server.getStartcode());
    }
+   builder.setMasterSystemTime(EnvironmentEdgeManager.currentTime());
    return builder.build();
  }
 
@@ -849,6 +860,16 @@ public final class RequestConverter {
     return builder.build();
   }
 
+  /**
+   *  Create a WarmupRegionRequest for a given region name
+   *
+   *  @param regionInfo Region we are warming up
+   */
+  public static WarmupRegionRequest buildWarmupRegionRequest(final HRegionInfo regionInfo) {
+    WarmupRegionRequest.Builder builder = WarmupRegionRequest.newBuilder();
+    builder.setRegionInfo(HRegionInfo.convert(regionInfo));
+    return builder.build();
+  }
  /**
   * Create a CloseRegionRequest for a given encoded region name
   *
@@ -1326,6 +1347,15 @@ public final class RequestConverter {
    */
   public static SetBalancerRunningRequest buildSetBalancerRunningRequest(boolean on, boolean synchronous) {
     return SetBalancerRunningRequest.newBuilder().setOn(on).setSynchronous(synchronous).build();
+  }
+
+  /**
+   * Creates a protocol buffer IsBalancerEnabledRequest
+   *
+   * @return a IsBalancerEnabledRequest
+   */
+  public static IsBalancerEnabledRequest buildIsBalancerEnabledRequest() {
+    return IsBalancerEnabledRequest.newBuilder().build();
   }
 
   /**

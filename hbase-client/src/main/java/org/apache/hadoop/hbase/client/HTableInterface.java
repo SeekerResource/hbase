@@ -46,14 +46,6 @@ public interface HTableInterface extends Table {
   byte[] getTableName();
 
   /**
-   * @deprecated Use {@link #incrementColumnValue(byte[], byte[], byte[], long, Durability)}
-   */
-  @Deprecated
-  long incrementColumnValue(final byte [] row, final byte [] family,
-      final byte [] qualifier, final long amount, final boolean writeToWAL)
-  throws IOException;
-
-  /**
    * @deprecated Use {@link #existsAll(java.util.List)}  instead.
    */
   @Deprecated
@@ -118,7 +110,7 @@ public interface HTableInterface extends Table {
    */
   @Deprecated
   void setAutoFlushTo(boolean autoFlush);
-  
+
   /**
    * Tells whether or not 'auto-flush' is turned on.
    *
@@ -134,7 +126,7 @@ public interface HTableInterface extends Table {
    * Executes all the buffered {@link Put} operations.
    * <p>
    * This method gets called once automatically for every {@link Put} or batch
-   * of {@link Put}s (when <code>put(List<Put>)</code> is used) when
+   * of {@link Put}s (when <code>put(List&lt;Put&gt;)</code> is used) when
    * {@link #isAutoFlush} is {@code true}.
    * @throws IOException if a remote or network exception occurs.
    * @deprecated as of 1.0.0. Replaced by {@link BufferedMutator#flush()}

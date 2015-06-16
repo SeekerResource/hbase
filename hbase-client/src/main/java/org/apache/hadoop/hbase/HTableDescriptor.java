@@ -179,7 +179,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
 
   /**
    * <em>INTERNAL</em> flag to indicate whether or not the memstore should be replicated
-   * for read-replicas (CONSISTENCY => TIMELINE).
+   * for read-replicas (CONSISTENCY =&gt; TIMELINE).
    */
   public static final String REGION_MEMSTORE_REPLICATION = "REGION_MEMSTORE_REPLICATION";
   private static final Bytes REGION_MEMSTORE_REPLICATION_KEY =
@@ -294,10 +294,12 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   /**
    * Default constructor which constructs an empty object.
    * For deserializing an HTableDescriptor instance only.
-   * @deprecated Used by Writables and Writables are going away.
+   * @deprecated As of release 0.96 (<a href="https://issues.apache.org/jira/browse/HBASE-5453">HBASE-5453</a>).
+   *             This was made protected in 2.0.0 and will be removed in HBase 3.0.0.
+   *             Used by Writables and Writables are going away.
    */
   @Deprecated
-  public HTableDescriptor() {
+  protected HTableDescriptor() {
     super();
   }
 
@@ -884,16 +886,16 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
     // step 1: set partitioning and pruning
     Set<Bytes> reservedKeys = new TreeSet<Bytes>();
     Set<Bytes> userKeys = new TreeSet<Bytes>();
-    for (Bytes k : values.keySet()) {
-      if (k == null || k.get() == null) continue;
-      String key = Bytes.toString(k.get());
+    for (Map.Entry<Bytes, Bytes> entry : values.entrySet()) {
+      if (entry.getKey() == null || entry.getKey().get() == null) continue;
+      String key = Bytes.toString(entry.getKey().get());
       // in this section, print out reserved keywords + coprocessor info
-      if (!RESERVED_KEYWORDS.contains(k) && !key.startsWith("coprocessor$")) {
-        userKeys.add(k);
+      if (!RESERVED_KEYWORDS.contains(entry.getKey()) && !key.startsWith("coprocessor$")) {
+        userKeys.add(entry.getKey());
         continue;
       }
       // only print out IS_ROOT/IS_META if true
-      String value = Bytes.toString(values.get(k).get());
+      String value = Bytes.toString(entry.getValue().get());
       if (key.equalsIgnoreCase(IS_ROOT) || key.equalsIgnoreCase(IS_META)) {
         if (Boolean.valueOf(value) == false) continue;
       }
@@ -901,7 +903,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
       if (printDefaults
           || !DEFAULT_VALUES.containsKey(key)
           || !DEFAULT_VALUES.get(key).equalsIgnoreCase(value)) {
-        reservedKeys.add(k);
+        reservedKeys.add(entry.getKey());
       }
     }
 

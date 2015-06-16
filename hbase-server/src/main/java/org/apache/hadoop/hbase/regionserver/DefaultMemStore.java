@@ -34,6 +34,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
@@ -84,7 +85,7 @@ public class DefaultMemStore implements MemStore {
   // Snapshot of memstore.  Made for flusher.
   volatile CellSkipListSet snapshot;
 
-  final KeyValue.KVComparator comparator;
+  final CellComparator comparator;
 
   // Used to track own heapSize
   final AtomicLong size;
@@ -99,12 +100,13 @@ public class DefaultMemStore implements MemStore {
   volatile MemStoreLAB allocator;
   volatile MemStoreLAB snapshotAllocator;
   volatile long snapshotId;
+  volatile boolean tagsPresent;
 
   /**
    * Default constructor. Used for tests.
    */
   public DefaultMemStore() {
-    this(HBaseConfiguration.create(), KeyValue.COMPARATOR);
+    this(HBaseConfiguration.create(), CellComparator.COMPARATOR);
   }
 
   /**
@@ -112,7 +114,7 @@ public class DefaultMemStore implements MemStore {
    * @param c Comparator
    */
   public DefaultMemStore(final Configuration conf,
-                  final KeyValue.KVComparator c) {
+                  final CellComparator c) {
     this.conf = conf;
     this.comparator = c;
     this.cellSet = new CellSkipListSet(c);
@@ -170,8 +172,11 @@ public class DefaultMemStore implements MemStore {
         timeOfOldestEdit = Long.MAX_VALUE;
       }
     }
-    return new MemStoreSnapshot(this.snapshotId, snapshot.size(), this.snapshotSize,
-        this.snapshotTimeRangeTracker, new CollectionBackedScanner(snapshot, this.comparator));
+    MemStoreSnapshot memStoreSnapshot = new MemStoreSnapshot(this.snapshotId, snapshot.size(), this.snapshotSize,
+        this.snapshotTimeRangeTracker, new CollectionBackedScanner(snapshot, this.comparator),
+        this.tagsPresent);
+    this.tagsPresent = false;
+    return memStoreSnapshot;
   }
 
   /**
@@ -217,7 +222,7 @@ public class DefaultMemStore implements MemStore {
   /**
    * Write an update
    * @param cell
-   * @return approximate size of the passed KV & newly added KV which maybe different than the
+   * @return approximate size of the passed KV &amp; newly added KV which maybe different than the
    *         passed-in KV
    */
   @Override
@@ -233,6 +238,13 @@ public class DefaultMemStore implements MemStore {
 
   private boolean addToCellSet(Cell e) {
     boolean b = this.cellSet.add(e);
+    // In no tags case this NoTagsKeyValue.getTagsLength() is a cheap call.
+    // When we use ACL CP or Visibility CP which deals with Tags during
+    // mutation, the TagRewriteCell.getTagsLength() is a cheaper call. We do not
+    // parse the byte[] to identify the tags length.
+    if(e.getTagsLength() > 0) {
+      tagsPresent = true;
+    }
     setOldestEditTimeToNow();
     return b;
   }
@@ -1005,8 +1017,8 @@ public class DefaultMemStore implements MemStore {
     }
   }
 
-  public final static long FIXED_OVERHEAD = ClassSize.align(
-      ClassSize.OBJECT + (9 * ClassSize.REFERENCE) + (3 * Bytes.SIZEOF_LONG));
+  public final static long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
+      + (9 * ClassSize.REFERENCE) + (3 * Bytes.SIZEOF_LONG) + Bytes.SIZEOF_BOOLEAN);
 
   public final static long DEEP_OVERHEAD = ClassSize.align(FIXED_OVERHEAD +
       ClassSize.ATOMIC_LONG + (2 * ClassSize.TIMERANGE_TRACKER) +

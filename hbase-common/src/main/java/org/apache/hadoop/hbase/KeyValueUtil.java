@@ -18,7 +18,10 @@
 
 package org.apache.hadoop.hbase;
 
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -31,6 +34,7 @@ import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.IterableUtils;
 import org.apache.hadoop.hbase.util.SimpleMutableByteRange;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.WritableUtils;
 
 import com.google.common.base.Function;
@@ -54,7 +58,7 @@ public class KeyValueUtil {
         cell.getValueLength(), cell.getTagsLength(), true);
   }
 
-  private static int length(short rlen, byte flen, int qlen, int vlen, int tlen, boolean withTags) {
+  public static int length(short rlen, byte flen, int qlen, int vlen, int tlen, boolean withTags) {
     if (withTags) {
       return (int) (KeyValue.getKeyValueDataStructureSize(rlen, flen, qlen, vlen, tlen));
     }
@@ -522,7 +526,7 @@ public class KeyValueUtil {
   /*************** misc **********************************/
   /**
    * @param cell
-   * @return <code>cell<code> if it is an instance of {@link KeyValue} else we will return a
+   * @return <code>cell</code> if it is an instance of {@link KeyValue} else we will return a
    * new {@link KeyValue} instance made from <code>cell</code>
    * @deprecated without any replacement.
    */
@@ -541,11 +545,132 @@ public class KeyValueUtil {
     });
     return new ArrayList<KeyValue>(lazyList);
   }
+  /**
+   * Write out a KeyValue in the manner in which we used to when KeyValue was a
+   * Writable.
+   *
+   * @param kv
+   * @param out
+   * @return Length written on stream
+   * @throws IOException
+   * @see #create(DataInput) for the inverse function
+   */
+  public static long write(final KeyValue kv, final DataOutput out) throws IOException {
+    // This is how the old Writables write used to serialize KVs. Need to figure
+    // way to make it
+    // work for all implementations.
+    int length = kv.getLength();
+    out.writeInt(length);
+    out.write(kv.getBuffer(), kv.getOffset(), length);
+    return length + Bytes.SIZEOF_INT;
+  }
+
+  /**
+   * Create a KeyValue reading from the raw InputStream. Named
+   * <code>iscreate</code> so doesn't clash with {@link #create(DataInput)}
+   *
+   * @param in
+   * @param withTags whether the keyvalue should include tags are not
+   * @return Created KeyValue OR if we find a length of zero, we will return
+   *         null which can be useful marking a stream as done.
+   * @throws IOException
+   */
+  public static KeyValue iscreate(final InputStream in, boolean withTags) throws IOException {
+    byte[] intBytes = new byte[Bytes.SIZEOF_INT];
+    int bytesRead = 0;
+    while (bytesRead < intBytes.length) {
+      int n = in.read(intBytes, bytesRead, intBytes.length - bytesRead);
+      if (n < 0) {
+        if (bytesRead == 0)
+          return null; // EOF at start is ok
+        throw new IOException("Failed read of int, read " + bytesRead + " bytes");
+      }
+      bytesRead += n;
+    }
+    // TODO: perhaps some sanity check is needed here.
+    byte[] bytes = new byte[Bytes.toInt(intBytes)];
+    IOUtils.readFully(in, bytes, 0, bytes.length);
+    if (withTags) {
+      return new KeyValue(bytes, 0, bytes.length);
+    } else {
+      return new NoTagsKeyValue(bytes, 0, bytes.length);
+    }
+  }
+
+  /**
+   * @param b
+   * @return A KeyValue made of a byte array that holds the key-only part.
+   *         Needed to convert hfile index members to KeyValues.
+   */
+  public static KeyValue createKeyValueFromKey(final byte[] b) {
+    return createKeyValueFromKey(b, 0, b.length);
+  }
+
+  /**
+   * @param bb
+   * @return A KeyValue made of a byte buffer that holds the key-only part.
+   *         Needed to convert hfile index members to KeyValues.
+   */
+  public static KeyValue createKeyValueFromKey(final ByteBuffer bb) {
+    return createKeyValueFromKey(bb.array(), bb.arrayOffset(), bb.limit());
+  }
+
+  /**
+   * @param b
+   * @param o
+   * @param l
+   * @return A KeyValue made of a byte array that holds the key-only part.
+   *         Needed to convert hfile index members to KeyValues.
+   */
+  public static KeyValue createKeyValueFromKey(final byte[] b, final int o, final int l) {
+    byte[] newb = new byte[l + KeyValue.ROW_OFFSET];
+    System.arraycopy(b, o, newb, KeyValue.ROW_OFFSET, l);
+    Bytes.putInt(newb, 0, l);
+    Bytes.putInt(newb, Bytes.SIZEOF_INT, 0);
+    return new KeyValue(newb);
+  }
+
+  /**
+   * @param in
+   *          Where to read bytes from. Creates a byte array to hold the
+   *          KeyValue backing bytes copied from the steam.
+   * @return KeyValue created by deserializing from <code>in</code> OR if we
+   *         find a length of zero, we will return null which can be useful
+   *         marking a stream as done.
+   * @throws IOException
+   */
+  public static KeyValue create(final DataInput in) throws IOException {
+    return create(in.readInt(), in);
+  }
+
+  /**
+   * Create a KeyValue reading <code>length</code> from <code>in</code>
+   * 
+   * @param length
+   * @param in
+   * @return Created KeyValue OR if we find a length of zero, we will return
+   *         null which can be useful marking a stream as done.
+   * @throws IOException
+   */
+  public static KeyValue create(int length, final DataInput in) throws IOException {
+
+    if (length <= 0) {
+      if (length == 0)
+        return null;
+      throw new IOException("Failed read " + length + " bytes, stream corrupt?");
+    }
+
+    // This is how the old Writables.readFrom used to deserialize. Didn't even
+    // vint.
+    byte[] bytes = new byte[length];
+    in.readFully(bytes);
+    return new KeyValue(bytes, 0, length);
+  }
 
   public static void oswrite(final Cell cell, final OutputStream out, final boolean withTags)
       throws IOException {
-    if (cell instanceof KeyValue) {
-      KeyValue.oswrite((KeyValue) cell, out, withTags);
+    if (cell instanceof Streamable) {
+      ((Streamable)cell).write(out, withTags);
     } else {
       short rlen = cell.getRowLength();
       byte flen = cell.getFamilyLength();
@@ -554,11 +679,11 @@ public class KeyValueUtil {
       int tlen = cell.getTagsLength();
 
       // write total length
-      StreamUtils.writeInt(out, length(rlen, flen, qlen, vlen, tlen, withTags));
+      KeyValue.writeInt(out, length(rlen, flen, qlen, vlen, tlen, withTags));
       // write key length
-      StreamUtils.writeInt(out, keyLength(rlen, flen, qlen));
+      KeyValue.writeInt(out, keyLength(rlen, flen, qlen));
       // write value length
-      StreamUtils.writeInt(out, vlen);
+      KeyValue.writeInt(out, vlen);
       // Write rowkey - 2 bytes rk length followed by rowkey bytes
       StreamUtils.writeShort(out, rlen);
       out.write(cell.getRowArray(), cell.getRowOffset(), rlen);
@@ -574,9 +699,10 @@ public class KeyValueUtil {
       // write value
       out.write(cell.getValueArray(), cell.getValueOffset(), vlen);
       // write tags if we have to
-      if (withTags) {
+      if (withTags && tlen > 0) {
         // 2 bytes tags length followed by tags bytes
-        // tags length is serialized with 2 bytes only(short way) even if the type is int. As this
+        // tags length is serialized with 2 bytes only(short way) even if the
+        // type is int. As this
         // is non -ve numbers, we save the sign bit. See HBASE-11437
         out.write((byte) (0xff & (tlen >> 8)));
         out.write((byte) (0xff & tlen));

@@ -206,7 +206,7 @@ public class HeapMemoryManager {
   }
 
   /**
-   * @return heap occupancy percentage, 0 <= n <= 1
+   * @return heap occupancy percentage, 0 &lt;= n &lt;= 1
    */
   public float getHeapOccupancyPercent() {
     return this.heapOccupancyPercent;
@@ -264,10 +264,11 @@ public class HeapMemoryManager {
     }
 
     private void tune() {
-      evictCount = blockCache.getStats().getEvictedCount() - evictCount;
+      long curEvictCount = blockCache.getStats().getEvictedCount();
+      tunerContext.setEvictCount(curEvictCount - evictCount);
+      evictCount = curEvictCount;
       tunerContext.setBlockedFlushCount(blockedFlushCount.getAndSet(0));
       tunerContext.setUnblockedFlushCount(unblockedFlushCount.getAndSet(0));
-      tunerContext.setEvictCount(evictCount);
       tunerContext.setCurBlockCacheSize(blockCachePercent);
       tunerContext.setCurMemStoreSize(globalMemStorePercent);
       TunerResult result = null;
@@ -324,7 +325,7 @@ public class HeapMemoryManager {
     }
 
     @Override
-    public void flushRequested(FlushType type, HRegion region) {
+    public void flushRequested(FlushType type, Region region) {
       switch (type) {
       case ABOVE_HIGHER_MARK:
         blockedFlushCount.incrementAndGet();

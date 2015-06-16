@@ -51,40 +51,33 @@ import org.apache.hadoop.hbase.util.Bytes;
  * and stopRow may be defined.  If rows are not specified, the Scanner will
  * iterate over all rows.
  * <p>
- * To scan everything for each row, instantiate a Scan object.
+ * To get all columns from all rows of a Table, create an instance with no constraints; use the
+ * {@link #Scan()} constructor. To constrain the scan to specific column families,
+ * call {@link #addFamily(byte[]) addFamily} for each family to retrieve on your Scan instance.
  * <p>
- * To modify scanner caching for just this scan, use {@link #setCaching(int) setCaching}.
- * If caching is NOT set, we will use the caching value of the hosting {@link Table}.
- * In addition to row caching, it is possible to specify a
- * maximum result size, using {@link #setMaxResultSize(long)}. When both are used,
- * single server requests are limited by either number of rows or maximum result size, whichever
- * limit comes first.
- * <p>
- * To further define the scope of what to get when scanning, perform additional
- * methods as outlined below.
- * <p>
- * To get all columns from specific families, execute {@link #addFamily(byte[]) addFamily}
- * for each family to retrieve.
- * <p>
- * To get specific columns, execute {@link #addColumn(byte[], byte[]) addColumn}
+ * To get specific columns, call {@link #addColumn(byte[], byte[]) addColumn}
  * for each column to retrieve.
  * <p>
  * To only retrieve columns within a specific range of version timestamps,
- * execute {@link #setTimeRange(long, long) setTimeRange}.
+ * call {@link #setTimeRange(long, long) setTimeRange}.
  * <p>
- * To only retrieve columns with a specific timestamp, execute
+ * To only retrieve columns with a specific timestamp, call
  * {@link #setTimeStamp(long) setTimestamp}.
  * <p>
- * To limit the number of versions of each column to be returned, execute
+ * To limit the number of versions of each column to be returned, call
  * {@link #setMaxVersions(int) setMaxVersions}.
  * <p>
  * To limit the maximum number of values returned for each call to next(),
- * execute {@link #setBatch(int) setBatch}.
+ * call {@link #setBatch(int) setBatch}.
  * <p>
- * To add a filter, execute {@link #setFilter(org.apache.hadoop.hbase.filter.Filter) setFilter}.
+ * To add a filter, call {@link #setFilter(org.apache.hadoop.hbase.filter.Filter) setFilter}.
  * <p>
  * Expert: To explicitly disable server-side block caching for this scan,
  * execute {@link #setCacheBlocks(boolean)}.
+ * <p><em>Note:</em> Usage alters Scan instances. Internally, attributes are updated as the Scan
+ * runs and if enabled, metrics accumulate in the Scan instance. Be aware this is the case when
+ * you go to clone a Scan instance or if you go to reuse a created Scan instance; safer is create
+ * a Scan instance per usage.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
@@ -145,8 +138,23 @@ public class Scan extends Query {
   private Map<byte [], NavigableSet<byte []>> familyMap =
     new TreeMap<byte [], NavigableSet<byte []>>(Bytes.BYTES_COMPARATOR);
   private Boolean loadColumnFamiliesOnDemand = null;
+  private Boolean asyncPrefetch = null;
 
   /**
+   * Parameter name for client scanner sync/async prefetch toggle.
+   * When using async scanner, prefetching data from the server is done at the background.
+   * The parameter currently won't have any effect in the case that the user has set
+   * Scan#setSmall or Scan#setReversed
+   */
+  public static final String HBASE_CLIENT_SCANNER_ASYNC_PREFETCH =
+      "hbase.client.scanner.async.prefetch";
+
+  /**
+   * Default value of {@link #HBASE_CLIENT_SCANNER_ASYNC_PREFETCH}.
+   */
+  public static final boolean DEFAULT_HBASE_CLIENT_SCANNER_ASYNC_PREFETCH = false;
+
+   /**
    * Set it true for small scan to get better performance
    *
    * Small scan should use pread and big scan can use seek + read
@@ -220,6 +228,7 @@ public class Scan extends Query {
     loadColumnFamiliesOnDemand = scan.getLoadColumnFamiliesOnDemandValue();
     consistency = scan.getConsistency();
     reversed = scan.isReversed();
+    asyncPrefetch = scan.isAsyncPrefetch();
     small = scan.isSmall();
     TimeRange ctr = scan.getTimeRange();
     tr = new TimeRange(ctr.getMin(), ctr.getMax());
@@ -255,6 +264,7 @@ public class Scan extends Query {
     this.tr = get.getTimeRange();
     this.familyMap = get.getFamilyMap();
     this.getScan = true;
+    this.asyncPrefetch = false;
     this.consistency = get.getConsistency();
     for (Map.Entry<String, byte[]> attr : get.getAttributesMap().entrySet()) {
       setAttribute(attr.getKey(), attr.getValue());
@@ -717,10 +727,10 @@ public class Scan extends Query {
    * this can deliver huge perf gains when there's a cf with lots of data; however, it can
    * also lead to some inconsistent results, as follows:
    * - if someone does a concurrent update to both column families in question you may get a row
-   *   that never existed, e.g. for { rowKey = 5, { cat_videos => 1 }, { video => "my cat" } }
-   *   someone puts rowKey 5 with { cat_videos => 0 }, { video => "my dog" }, concurrent scan
-   *   filtering on "cat_videos == 1" can get { rowKey = 5, { cat_videos => 1 },
-   *   { video => "my dog" } }.
+   *   that never existed, e.g. for { rowKey = 5, { cat_videos =&gt; 1 }, { video =&gt; "my cat" } }
+   *   someone puts rowKey 5 with { cat_videos =&gt; 0 }, { video =&gt; "my dog" }, concurrent scan
+   *   filtering on "cat_videos == 1" can get { rowKey = 5, { cat_videos =&gt; 1 },
+   *   { video =&gt; "my dog" } }.
    * - if there's a concurrent split and you have more than 2 column families, some rows may be
    *   missing some column families.
    */
@@ -970,5 +980,14 @@ public class Scan extends Query {
     byte [] bytes = getAttribute(Scan.SCAN_ATTRIBUTES_METRICS_DATA);
     if (bytes == null) return null;
     return ProtobufUtil.toScanMetrics(bytes);
+  }
+
+  public Boolean isAsyncPrefetch() {
+    return asyncPrefetch;
+  }
+
+  public Scan setAsyncPrefetch(boolean asyncPrefetch) {
+    this.asyncPrefetch = asyncPrefetch;
+    return this;
   }
 }

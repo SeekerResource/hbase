@@ -24,7 +24,6 @@ import java.lang.management.MemoryMXBean;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -35,6 +34,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -49,7 +49,6 @@ import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.TableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -65,7 +64,7 @@ import com.google.common.collect.Lists;
 /** memstore test case */
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestDefaultMemStore extends TestCase {
-  private final Log LOG = LogFactory.getLog(this.getClass());
+  private static final Log LOG = LogFactory.getLog(TestDefaultMemStore.class);
   private DefaultMemStore memstore;
   private static final int ROW_COUNT = 10;
   private static final int QUALIFIER_COUNT = ROW_COUNT;
@@ -108,7 +107,7 @@ public class TestDefaultMemStore extends TestCase {
     StoreScanner s = new StoreScanner(scan, scanInfo, scanType, null, memstorescanners);
     int count = 0;
     try {
-      while (NextState.hasMoreValues(s.next(result))) {
+      while (s.next(result)) {
         LOG.info(result);
         count++;
         // Row count is same as column count.
@@ -128,7 +127,7 @@ public class TestDefaultMemStore extends TestCase {
     s = new StoreScanner(scan, scanInfo, scanType, null, memstorescanners);
     count = 0;
     try {
-      while (NextState.hasMoreValues(s.next(result))) {
+      while (s.next(result)) {
         LOG.info(result);
         // Assert the stuff is coming out in right order.
         assertTrue(CellUtil.matchingRow(result.get(0), Bytes.toBytes(count)));
@@ -155,7 +154,7 @@ public class TestDefaultMemStore extends TestCase {
     count = 0;
     int snapshotIndex = 5;
     try {
-      while (NextState.hasMoreValues(s.next(result))) {
+      while (s.next(result)) {
         LOG.info(result);
         // Assert the stuff is coming out in right order.
         assertTrue(CellUtil.matchingRow(result.get(0), Bytes.toBytes(count)));
@@ -476,7 +475,7 @@ public class TestDefaultMemStore extends TestCase {
   }
 
   public void testMultipleVersionsSimple() throws Exception {
-    DefaultMemStore m = new DefaultMemStore(new Configuration(), KeyValue.COMPARATOR);
+    DefaultMemStore m = new DefaultMemStore(new Configuration(), CellComparator.COMPARATOR);
     byte [] row = Bytes.toBytes("testRow");
     byte [] family = Bytes.toBytes("testFamily");
     byte [] qf = Bytes.toBytes("testQualifier");
@@ -508,7 +507,7 @@ public class TestDefaultMemStore extends TestCase {
     Thread.sleep(1);
     addRows(this.memstore);
     Cell closestToEmpty = this.memstore.getNextRow(KeyValue.LOWESTKEY);
-    assertTrue(KeyValue.COMPARATOR.compareRows(closestToEmpty,
+    assertTrue(CellComparator.COMPARATOR.compareRows(closestToEmpty,
       new KeyValue(Bytes.toBytes(0), System.currentTimeMillis())) == 0);
     for (int i = 0; i < ROW_COUNT; i++) {
       Cell nr = this.memstore.getNextRow(new KeyValue(Bytes.toBytes(i),
@@ -516,7 +515,7 @@ public class TestDefaultMemStore extends TestCase {
       if (i + 1 == ROW_COUNT) {
         assertEquals(nr, null);
       } else {
-        assertTrue(KeyValue.COMPARATOR.compareRows(nr,
+        assertTrue(CellComparator.COMPARATOR.compareRows(nr,
           new KeyValue(Bytes.toBytes(i + 1), System.currentTimeMillis())) == 0);
       }
     }
@@ -529,14 +528,13 @@ public class TestDefaultMemStore extends TestCase {
           Bytes.toBytes(startRowId)), scanInfo, scanType, null,
           memstore.getScanners(0));
       List<Cell> results = new ArrayList<Cell>();
-      for (int i = 0; NextState.hasMoreValues(scanner.next(results)); i++) {
+      for (int i = 0; scanner.next(results); i++) {
         int rowId = startRowId + i;
         Cell left = results.get(0);
         byte[] row1 = Bytes.toBytes(rowId);
         assertTrue(
             "Row name",
-            KeyValue.COMPARATOR.compareRows(left.getRowArray(), left.getRowOffset(),
-                (int) left.getRowLength(), row1, 0, row1.length) == 0);
+            CellComparator.COMPARATOR.compareRows(left, row1, 0, row1.length) == 0);
         assertEquals("Count of columns", QUALIFIER_COUNT, results.size());
         List<Cell> row = new ArrayList<Cell>();
         for (Cell kv : results) {
@@ -788,7 +786,7 @@ public class TestDefaultMemStore extends TestCase {
   public void testUpsertMSLAB() throws Exception {
     Configuration conf = HBaseConfiguration.create();
     conf.setBoolean(DefaultMemStore.USEMSLAB_KEY, true);
-    memstore = new DefaultMemStore(conf, KeyValue.COMPARATOR);
+    memstore = new DefaultMemStore(conf, CellComparator.COMPARATOR);
 
     int ROW_SIZE = 2048;
     byte[] qualifier = new byte[ROW_SIZE - 4];
@@ -829,7 +827,7 @@ public class TestDefaultMemStore extends TestCase {
    */
   public void testUpsertMemstoreSize() throws Exception {
     Configuration conf = HBaseConfiguration.create();
-    memstore = new DefaultMemStore(conf, KeyValue.COMPARATOR);
+    memstore = new DefaultMemStore(conf, CellComparator.COMPARATOR);
     long oldSize = memstore.size.get();
 
     List<Cell> l = new ArrayList<Cell>();
@@ -924,16 +922,17 @@ public class TestDefaultMemStore extends TestCase {
       HBaseTestingUtility hbaseUtility = HBaseTestingUtility.createLocalHTU(conf);
       HRegion region = hbaseUtility.createTestRegion("foobar", new HColumnDescriptor("foo"));
 
-      Map<byte[], Store> stores = region.getStores();
+      List<Store> stores = region.getStores();
       assertTrue(stores.size() == 1);
 
-      Store s = stores.entrySet().iterator().next().getValue();
+      Store s = stores.iterator().next();
       edge.setCurrentTimeMillis(1234);
       s.add(KeyValueTestUtil.create("r", "f", "q", 100, "v"));
       edge.setCurrentTimeMillis(1234 + 100);
-      assertTrue(region.shouldFlush() == false);
+      StringBuffer sb = new StringBuffer();
+      assertTrue(region.shouldFlush(sb) == false);
       edge.setCurrentTimeMillis(1234 + 10000);
-      assertTrue(region.shouldFlush() == expected);
+      assertTrue(region.shouldFlush(sb) == expected);
     } finally {
       EnvironmentEdgeManager.reset();
     }
@@ -964,9 +963,10 @@ public class TestDefaultMemStore extends TestCase {
             wFactory.getWAL(hri.getEncodedNameAsBytes()));
     HRegion.addRegionToMETA(meta, r);
     edge.setCurrentTimeMillis(1234 + 100);
-    assertTrue(meta.shouldFlush() == false);
+    StringBuffer sb = new StringBuffer();
+    assertTrue(meta.shouldFlush(sb) == false);
     edge.setCurrentTimeMillis(edge.currentTime() + HRegion.META_CACHE_FLUSH_INTERVAL + 1);
-    assertTrue(meta.shouldFlush() == true);
+    assertTrue(meta.shouldFlush(sb) == true);
   }
 
   private class EnvironmentEdgeForMemstoreTest implements EnvironmentEdge {

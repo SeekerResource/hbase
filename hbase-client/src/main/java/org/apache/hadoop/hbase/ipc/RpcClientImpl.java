@@ -23,6 +23,9 @@ import com.google.protobuf.Descriptors.MethodDescriptor;
 import com.google.protobuf.Message;
 import com.google.protobuf.Message.Builder;
 import com.google.protobuf.RpcCallback;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
@@ -31,6 +34,7 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.codec.Codec;
 import org.apache.hadoop.hbase.exceptions.ConnectionClosingException;
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AuthenticationProtos;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.CellBlockMeta;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ConnectionHeader;
@@ -100,6 +104,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @InterfaceAudience.Private
 public class RpcClientImpl extends AbstractRpcClient {
+  private static final Log LOG = LogFactory.getLog(RpcClientImpl.class);
   protected final AtomicInteger callIdCnt = new AtomicInteger();
 
   protected final PoolMap<ConnectionId, Connection> connections;
@@ -357,6 +362,7 @@ public class RpcClientImpl extends AbstractRpcClient {
       if (this.compressor != null) {
         builder.setCellBlockCompressorClass(this.compressor.getClass().getCanonicalName());
       }
+      builder.setVersionInfo(ProtobufUtil.getVersionInfo());
       this.header = builder.build();
 
       this.setName("IPC Client (" + socketFactory.hashCode() +") connection to " +
@@ -1107,6 +1113,16 @@ public class RpcClientImpl extends AbstractRpcClient {
     synchronized (connections) {
       for (Connection conn : connections.values()) {
         conn.interrupt();
+        if (conn.callSender != null) {
+          conn.callSender.interrupt();
+        }
+
+        // In case the CallSender did not setupIOStreams() yet, the Connection may not be started
+        // at all (if CallSender has a cancelled Call it can happen). See HBASE-13851
+        if (!conn.isAlive()) {
+          conn.markClosed(new InterruptedIOException("RpcClient is closing"));
+          conn.close();
+        }
       }
     }
 

@@ -36,6 +36,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -49,6 +50,7 @@ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.io.hfile.bucket.BucketCache;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -241,7 +243,6 @@ public class TestCacheOnWrite {
   public void setUp() throws IOException {
     conf = TEST_UTIL.getConfiguration();
     this.conf.set("dfs.datanode.data.dir.perm", "700");
-    conf.setInt(HFile.FORMAT_VERSION_KEY, HFile.MAX_FORMAT_VERSION);
     conf.setInt(HFileBlockIndex.MAX_CHUNK_SIZE_KEY, INDEX_BLOCK_SIZE);
     conf.setInt(BloomFilterFactory.IO_STOREFILE_BLOOM_BLOCK_SIZE,
         BLOOM_BLOCK_SIZE);
@@ -271,12 +272,7 @@ public class TestCacheOnWrite {
   }
 
   private void readStoreFile(boolean useTags) throws IOException {
-    AbstractHFileReader reader;
-    if (useTags) {
-        reader = (HFileReaderV3) HFile.createReader(fs, storeFilePath, cacheConf, conf);
-    } else {
-        reader = (HFileReaderV2) HFile.createReader(fs, storeFilePath, cacheConf, conf);
-    }
+    HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConf, conf);
     LOG.info("HFile information: " + reader);
     HFileContext meta = new HFileContextBuilder().withCompression(compress)
       .withBytesPerCheckSum(CKBYTES).withChecksumType(ChecksumType.NULL)
@@ -377,11 +373,6 @@ public class TestCacheOnWrite {
   }
 
   private void writeStoreFile(boolean useTags) throws IOException {
-    if(useTags) {
-      TEST_UTIL.getConfiguration().setInt("hfile.format.version", 3);
-    } else {
-      TEST_UTIL.getConfiguration().setInt("hfile.format.version", 2);
-    }
     Path storeFileParentDir = new Path(TEST_UTIL.getDataTestDir(),
         "test_cache_on_write");
     HFileContext meta = new HFileContextBuilder().withCompression(compress)
@@ -389,7 +380,7 @@ public class TestCacheOnWrite {
         .withBlockSize(DATA_BLOCK_SIZE).withDataBlockEncoding(encoder.getDataBlockEncoding())
         .withIncludesTags(useTags).build();
     StoreFile.Writer sfw = new StoreFile.WriterBuilder(conf, cacheConf, fs)
-        .withOutputDir(storeFileParentDir).withComparator(KeyValue.COMPARATOR)
+        .withOutputDir(storeFileParentDir).withComparator(CellComparator.COMPARATOR)
         .withFileContext(meta)
         .withBloomType(BLOOM_TYPE).withMaxKeyCount(NUM_KV).build();
     byte[] cf = Bytes.toBytes("fam");
@@ -421,11 +412,6 @@ public class TestCacheOnWrite {
 
   private void testNotCachingDataBlocksDuringCompactionInternals(boolean useTags)
       throws IOException, InterruptedException {
-    if (useTags) {
-      TEST_UTIL.getConfiguration().setInt("hfile.format.version", 3);
-    } else {
-      TEST_UTIL.getConfiguration().setInt("hfile.format.version", 2);
-    }
     // TODO: need to change this test if we add a cache size threshold for
     // compactions, or if we implement some other kind of intelligent logic for
     // deciding what blocks to cache-on-write on compaction.
@@ -433,7 +419,7 @@ public class TestCacheOnWrite {
     final String cf = "myCF";
     final byte[] cfBytes = Bytes.toBytes(cf);
     final int maxVersions = 3;
-    HRegion region = TEST_UTIL.createTestRegion(table, 
+    Region region = TEST_UTIL.createTestRegion(table, 
         new HColumnDescriptor(cf)
             .setCompressionType(compress)
             .setBloomFilterType(BLOOM_TYPE)
@@ -467,18 +453,18 @@ public class TestCacheOnWrite {
         p.setDurability(Durability.ASYNC_WAL);
         region.put(p);
       }
-      region.flushcache();
+      region.flush(true);
     }
     clearBlockCache(blockCache);
     assertEquals(0, blockCache.getBlockCount());
-    region.compactStores();
+    region.compact(false);
     LOG.debug("compactStores() returned");
 
     for (CachedBlock block: blockCache) {
       assertNotEquals(BlockType.ENCODED_DATA, block.getBlockType());
       assertNotEquals(BlockType.DATA, block.getBlockType());
     }
-    region.close();
+    ((HRegion)region).close();
   }
 
   @Test

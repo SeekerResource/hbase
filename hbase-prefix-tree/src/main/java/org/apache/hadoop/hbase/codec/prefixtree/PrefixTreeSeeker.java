@@ -21,9 +21,9 @@ package org.apache.hadoop.hbase.codec.prefixtree;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.KeyValue.KVComparator;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.SettableSequenceId;
@@ -63,8 +63,9 @@ public class PrefixTreeSeeker implements EncodedSeeker {
   }
 
   /**
+   * <p>
    * Currently unused.
-   * <p/>
+   * </p>
    * TODO performance leak. should reuse the searchers. hbase does not currently have a hook where
    * this can be called
    */
@@ -110,12 +111,13 @@ public class PrefixTreeSeeker implements EncodedSeeker {
   }
 
   /**
+   * <p>
    * Currently unused.
-   * <p/>
+   * </p><p>
    * A nice, lightweight reference, though the underlying cell is transient. This method may return
    * the same reference to the backing PrefixTreeCell repeatedly, while other implementations may
    * return a different reference for each Cell.
-   * <p/>
+   * </p>
    * The goal will be to transition the upper layers of HBase, like Filters and KeyValueHeap, to
    * use this method instead of the getKeyValue() methods above.
    */
@@ -139,35 +141,6 @@ public class PrefixTreeSeeker implements EncodedSeeker {
 
 
   private static final boolean USE_POSITION_BEFORE = false;
-
-  /**
-   * Seek forward only (should be called reseekToKeyInBlock?).
-   * <p/>
-   * If the exact key is found look at the seekBefore variable and:<br/>
-   * - if true: go to the previous key if it's true<br/>
-   * - if false: stay on the exact key
-   * <p/>
-   * If the exact key is not found, then go to the previous key *if possible*, but remember to
-   * leave the scanner in a valid state if possible.
-   * <p/>
-   * @param keyOnlyBytes KeyValue format of a Cell's key at which to position the seeker
-   * @param offset offset into the keyOnlyBytes array
-   * @param length number of bytes of the keyOnlyBytes array to use
-   * @param forceBeforeOnExactMatch if an exact match is found and seekBefore=true, back up 1 Cell
-   * @return 0 if the seeker is on the exact key<br/>
-   *         1 if the seeker is not on the key for any reason, including seekBefore being true
-   */
-  @Override
-  public int seekToKeyInBlock(byte[] keyOnlyBytes, int offset, int length,
-      boolean forceBeforeOnExactMatch) {
-    if (USE_POSITION_BEFORE) {
-      return seekToOrBeforeUsingPositionAtOrBefore(keyOnlyBytes, offset, length,
-          forceBeforeOnExactMatch);
-    } else {
-      return seekToOrBeforeUsingPositionAtOrAfter(keyOnlyBytes, offset, length,
-          forceBeforeOnExactMatch);
-    }
-  }
 
   /*
    * Support both of these options since the underlying PrefixTree supports both.  Possibly
@@ -242,13 +215,6 @@ public class PrefixTreeSeeker implements EncodedSeeker {
   }
 
   @Override
-  public int compareKey(KVComparator comparator, byte[] key, int offset, int length) {
-    // can't optimize this, make a copy of the key
-    ByteBuffer bb = getKeyDeepCopy();
-    return comparator.compareFlatKey(key, offset, length, bb.array(), bb.arrayOffset(), bb.limit());
-  }
-
-  @Override
   public int seekToKeyInBlock(Cell key, boolean forceBeforeOnExactMatch) {
     if (USE_POSITION_BEFORE) {
       return seekToOrBeforeUsingPositionAtOrBefore(key, forceBeforeOnExactMatch);
@@ -258,7 +224,8 @@ public class PrefixTreeSeeker implements EncodedSeeker {
   }
 
   @Override
-  public int compareKey(KVComparator comparator, Cell key) {
+  public int compareKey(CellComparator comparator, Cell key) {
+    // can't optimize this, make a copy of the key
     ByteBuffer bb = getKeyDeepCopy();
     return comparator.compare(key,
         new KeyValue.KeyOnlyKeyValue(bb.array(), bb.arrayOffset(), bb.limit()));

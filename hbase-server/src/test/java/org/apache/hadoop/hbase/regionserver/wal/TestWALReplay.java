@@ -71,8 +71,8 @@ import org.apache.hadoop.hbase.regionserver.FlushRequestListener;
 import org.apache.hadoop.hbase.regionserver.FlushRequester;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.regionserver.MemStoreSnapshot;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.Store;
@@ -105,7 +105,7 @@ import org.mockito.Mockito;
  */
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestWALReplay {
-  public static final Log LOG = LogFactory.getLog(TestWALReplay.class);
+  private static final Log LOG = LogFactory.getLog(TestWALReplay.class);
   static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final EnvironmentEdge ee = EnvironmentEdgeManager.getDelegate();
   private Path hbaseRootDir = null;
@@ -203,9 +203,9 @@ public class TestWALReplay {
     assertEquals(1, regions.size());
 
     // move region to another regionserver
-    HRegion destRegion = regions.get(0);
+    Region destRegion = regions.get(0);
     int originServerNum = hbaseCluster
-        .getServerWith(destRegion.getRegionName());
+        .getServerWith(destRegion.getRegionInfo().getRegionName());
     assertTrue("Please start more than 1 regionserver", hbaseCluster
         .getRegionServerThreads().size() > 1);
     int destServerNum = 0;
@@ -229,13 +229,13 @@ public class TestWALReplay {
     assertEquals(0, count);
 
     // flush region and make major compaction
-    destServer.getOnlineRegion(destRegion.getRegionName()).flushcache();
+    Region region =  destServer.getOnlineRegion(destRegion.getRegionInfo().getRegionName());
+    region.flush(true);
     // wait to complete major compaction
-    for (Store store : destServer.getOnlineRegion(destRegion.getRegionName())
-        .getStores().values()) {
+    for (Store store : region.getStores()) {
       store.triggerMajorCompaction();
     }
-    destServer.getOnlineRegion(destRegion.getRegionName()).compactStores();
+    region.compact(true);
 
     // move region to origin regionserver
     moveRegionAndWait(destRegion, originServer);
@@ -251,7 +251,7 @@ public class TestWALReplay {
     resultScanner.close();
   }
 
-  private void moveRegionAndWait(HRegion destRegion, HRegionServer destServer)
+  private void moveRegionAndWait(Region destRegion, HRegionServer destServer)
       throws InterruptedException, MasterNotRunningException,
       ZooKeeperConnectionException, IOException {
     HMaster master = TEST_UTIL.getMiniHBaseCluster().getMaster();
@@ -286,7 +286,7 @@ public class TestWALReplay {
     deleteDir(basedir);
 
     HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    Region region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
     HBaseTestingUtility.closeRegionAndWAL(region2);
     final byte [] rowName = tableName.getName();
 
@@ -347,10 +347,10 @@ public class TestWALReplay {
     final Path basedir = new Path(this.hbaseRootDir, tableName.getNameAsString());
     deleteDir(basedir);
     final HTableDescriptor htd = createBasic3FamilyHTD(tableName);
-    HRegion region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
+    Region region2 = HBaseTestingUtility.createRegionAndWAL(hri, hbaseRootDir, this.conf, htd);
     HBaseTestingUtility.closeRegionAndWAL(region2);
     WAL wal = createWAL(this.conf);
-    HRegion region = HRegion.openHRegion(hri, htd, wal, this.conf);
+    Region region = HRegion.openHRegion(hri, htd, wal, this.conf);
 
     byte [] family = htd.getFamilies().iterator().next().getName();
     Path f =  new Path(basedir, "hfile");
@@ -358,7 +358,7 @@ public class TestWALReplay {
         Bytes.toBytes("z"), 10);
     List <Pair<byte[],String>>  hfs= new ArrayList<Pair<byte[],String>>(1);
     hfs.add(Pair.newPair(family, f.toString()));
-    region.bulkLoadHFiles(hfs, true);
+    region.bulkLoadHFiles(hfs, true, null);
 
     // Add an edit so something in the WAL
     byte [] row = tableName.getName();
@@ -431,12 +431,12 @@ public class TestWALReplay {
           Bytes.toBytes(i + "50"), 10);
       hfs.add(Pair.newPair(family, f.toString()));
     }
-    region.bulkLoadHFiles(hfs, true);
+    region.bulkLoadHFiles(hfs, true, null);
     final int rowsInsertedCount = 31;
     assertEquals(rowsInsertedCount, getScannedCount(region.getScanner(new Scan())));
 
     // major compact to turn all the bulk loaded files into one normal file
-    region.compactStores(true);
+    region.compact(true);
     assertEquals(rowsInsertedCount, getScannedCount(region.getScanner(new Scan())));
 
     // Now 'crash' the region by stealing its wal
@@ -498,7 +498,7 @@ public class TestWALReplay {
       addRegionEdits(rowName, hcd.getName(), countPerFamily, this.ee, region, "x");
       if (first ) {
         // If first, so we have at least one family w/ different seqid to rest.
-        region.flushcache();
+        region.flush(true);
         first = false;
       }
     }
@@ -613,7 +613,7 @@ public class TestWALReplay {
       result.size());
 
     // Let us flush the region
-    region.flushcache();
+    region.flush(true);
     region.close(true);
     wal.shutdown();
 
@@ -707,13 +707,15 @@ public class TestWALReplay {
     // Let us flush the region
     CustomStoreFlusher.throwExceptionWhenFlushing.set(true);
     try {
-      region.flushcache();
+      region.flush(true);
       fail("Injected exception hasn't been thrown");
     } catch (Throwable t) {
       LOG.info("Expected simulated exception when flushing region,"
           + t.getMessage());
       // simulated to abort server
       Mockito.doReturn(true).when(rsServices).isAborted();
+      region.setClosing(false); // region normally does not accept writes after
+      // DroppedSnapshotException. We mock around it for this test.
     }
     // writing more data
     int moreRow = 10;
@@ -727,7 +729,7 @@ public class TestWALReplay {
     // call flush again
     CustomStoreFlusher.throwExceptionWhenFlushing.set(false);
     try {
-      region.flushcache();
+      region.flush(true);
     } catch (IOException t) {
       LOG.info("Expected exception when flushing region because server is stopped,"
           + t.getMessage());
@@ -750,7 +752,7 @@ public class TestWALReplay {
     int scannedCount = 0;
     List<Cell> results = new ArrayList<Cell>();
     while (true) {
-      boolean existMore = NextState.hasMoreValues(scanner.next(results));
+      boolean existMore = scanner.next(results);
       if (!results.isEmpty())
         scannedCount++;
       if (!existMore)
@@ -883,7 +885,7 @@ public class TestWALReplay {
 
     // Let us flush the region
     // But this time completeflushcache is not yet done
-    region.flushcache();
+    region.flush(true);
     for (HColumnDescriptor hcd : htd.getFamilies()) {
       addRegionEdits(rowName, hcd.getName(), 5, this.ee, region, "x");
     }
@@ -958,16 +960,16 @@ public class TestWALReplay {
     private HRegion r;
 
     @Override
-    public void requestFlush(HRegion region, boolean forceFlushAllStores) {
+    public void requestFlush(Region region, boolean force) {
       try {
-        r.flushcache(forceFlushAllStores);
+        r.flush(force);
       } catch (IOException e) {
         throw new RuntimeException("Exception flushing", e);
       }
     }
 
     @Override
-    public void requestDelayedFlush(HRegion region, long when, boolean forceFlushAllStores) {
+    public void requestDelayedFlush(Region region, long when, boolean forceFlushAllStores) {
       // TODO Auto-generated method stub
 
     }
@@ -1006,7 +1008,7 @@ public class TestWALReplay {
   }
 
   static List<Put> addRegionEdits (final byte [] rowName, final byte [] family,
-      final int count, EnvironmentEdge ee, final HRegion r,
+      final int count, EnvironmentEdge ee, final Region r,
       final String qualifierPrefix)
   throws IOException {
     List<Put> puts = new ArrayList<Put>();

@@ -23,10 +23,10 @@ import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
-import org.apache.hadoop.hbase.KeyValue.KVComparator;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.KeyValue.KVComparator;
 
 /**
  * Immutable POJO class for representing a table name.
@@ -126,8 +126,8 @@ public final class TableName implements Comparable<TableName> {
    * The name may not start with '.' or '-'.
    *
    * Valid fully qualified table names:
-   * foo:bar, namespace=>foo, table=>bar
-   * org:foo.bar, namespace=org, table=>foo.bar
+   * foo:bar, namespace=&gt;foo, table=&gt;bar
+   * org:foo.bar, namespace=org, table=&gt;foo.bar
    */
   public static byte [] isLegalFullyQualifiedTableName(final byte[] tableName) {
     if (tableName == null || tableName.length <= 0) {
@@ -239,6 +239,19 @@ public final class TableName implements Comparable<TableName> {
 
   public String getNamespaceAsString() {
     return namespaceAsString;
+  }
+
+  /**
+   * Ideally, getNameAsString should contain namespace within it,
+   * but if the namespace is default, it just returns the name. This method
+   * takes care of this corner case.
+   */
+  public String getNameWithNamespaceInclAsString() {
+    if(getNamespaceAsString().equals(NamespaceDescriptor.DEFAULT_NAMESPACE_NAME_STR)) {
+      return NamespaceDescriptor.DEFAULT_NAMESPACE_NAME_STR +
+          TableName.NAMESPACE_DELIM + getNameAsString();
+    }
+    return getNameAsString();
   }
 
   public byte[] getQualifier() {
@@ -500,7 +513,11 @@ public final class TableName implements Comparable<TableName> {
    * Get the appropriate row comparator for this table.
    *
    * @return The comparator.
+   * @deprecated The comparator is an internal property of the table. Should
+   * not have been exposed here
    */
+  @InterfaceAudience.Private
+  @Deprecated
   public KVComparator getRowComparator() {
      if(TableName.META_TABLE_NAME.equals(this)) {
       return KeyValue.META_COMPARATOR;

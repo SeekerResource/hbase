@@ -34,6 +34,7 @@ import java.util.TreeSet;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.AuthUtil;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -61,9 +62,8 @@ import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos;
 import org.apache.hadoop.hbase.regionserver.BloomType;
-import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
@@ -93,6 +93,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
  * user,family,qualifier    column qualifier level permissions for a user
  * group,family,qualifier   column qualifier level permissions for a group
  * </pre>
+ * <p>
  * All values are encoded as byte arrays containing the codes from the
  * org.apache.hadoop.hbase.security.access.TablePermission.Action enum.
  * </p>
@@ -115,12 +116,8 @@ public class AccessControlLists {
    * Delimiter to separate user, column family, and qualifier in
    * _acl_ table info: column keys */
   public static final char ACL_KEY_DELIMITER = ',';
-  /** Prefix character to denote group names */
-  public static final String GROUP_PREFIX = "@";
-  /** Configuration key for superusers */
-  public static final String SUPERUSER_CONF_KEY = "hbase.superuser";
 
-  private static Log LOG = LogFactory.getLog(AccessControlLists.class);
+  private static final Log LOG = LogFactory.getLog(AccessControlLists.class);
 
   /**
    * Create the ACL table
@@ -328,7 +325,7 @@ public class AccessControlLists {
    * Returns {@code true} if the given region is part of the {@code _acl_}
    * metadata table.
    */
-  static boolean isAclRegion(HRegion region) {
+  static boolean isAclRegion(Region region) {
     return ACL_TABLE_NAME.equals(region.getTableDesc().getTableName());
   }
 
@@ -347,8 +344,7 @@ public class AccessControlLists {
    * @return a map of the permissions for this table.
    * @throws IOException
    */
-  static Map<byte[], ListMultimap<String,TablePermission>> loadAll(
-      HRegion aclRegion)
+  static Map<byte[], ListMultimap<String,TablePermission>> loadAll(Region aclRegion)
     throws IOException {
 
     if (!isAclRegion(aclRegion)) {
@@ -370,7 +366,7 @@ public class AccessControlLists {
       while (true) {
         List<Cell> row = new ArrayList<Cell>();
 
-        boolean hasNext = NextState.hasMoreValues(iScanner.next(row));
+        boolean hasNext = iScanner.next(row);
         ListMultimap<String,TablePermission> perms = ArrayListMultimap.create();
         byte[] entry = null;
         for (Cell kv : row) {
@@ -621,34 +617,6 @@ public class AccessControlLists {
     }
   }
 
-  /**
-   * Returns whether or not the given name should be interpreted as a group
-   * principal.  Currently this simply checks if the name starts with the
-   * special group prefix character ("@").
-   */
-  public static boolean isGroupPrincipal(String name) {
-    return name != null && name.startsWith(GROUP_PREFIX);
-  }
-
-  /**
-   * Returns the actual name for a group principal (stripped of the
-   * group prefix).
-   */
-  public static String getGroupName(String aclKey) {
-    if (!isGroupPrincipal(aclKey)) {
-      return aclKey;
-    }
-
-    return aclKey.substring(GROUP_PREFIX.length());
-  }
-
-  /**
-   * Returns the group entry with the group prefix for a group principal.
-   */
-  public static String toGroupEntry(String name) {
-    return GROUP_PREFIX + name;
-  }
-
   public static boolean isNamespaceEntry(String entryName) {
     return entryName.charAt(0) == NAMESPACE_PREFIX;
   }
@@ -707,7 +675,7 @@ public class AccessControlLists {
          String groupNames[] = user.getGroupNames();
          if (groupNames != null) {
            for (String group : groupNames) {
-             List<Permission> groupPerms = kvPerms.get(GROUP_PREFIX + group);
+             List<Permission> groupPerms = kvPerms.get(AuthUtil.toGroupEntry(group));
              if (results != null) {
                results.addAll(groupPerms);
              }

@@ -35,7 +35,7 @@ import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.io.compress.Compression;
-import org.apache.hadoop.hbase.io.hfile.AbstractHFileWriter;
+import org.apache.hadoop.hbase.io.hfile.HFileWriterImpl;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
@@ -50,7 +50,7 @@ import org.apache.hadoop.io.compress.Compressor;
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.TOOLS)
 @InterfaceStability.Evolving
 public class CompressionTest {
-  static final Log LOG = LogFactory.getLog(CompressionTest.class);
+  private static final Log LOG = LogFactory.getLog(CompressionTest.class);
 
   public static boolean testCompression(String codec) {
     codec = codec.toLowerCase();
@@ -120,7 +120,7 @@ public class CompressionTest {
   throws Exception {
     Configuration conf = HBaseConfiguration.create();
     HFileContext context = new HFileContextBuilder()
-                           .withCompression(AbstractHFileWriter.compressionByName(codec)).build();
+                           .withCompression(HFileWriterImpl.compressionByName(codec)).build();
     HFile.Writer writer = HFile.getWriterFactoryNoCache(conf)
         .withPath(fs, path)
         .withFileContext(context)
@@ -139,7 +139,7 @@ public class CompressionTest {
       scanner.seekTo(); // position to the start of file
       // Scanner does not do Cells yet. Do below for now till fixed.
       cc = scanner.getKeyValue();
-      if (CellComparator.compareRows(c, cc) != 0) {
+      if (CellComparator.COMPARATOR.compareRows(c, cc) != 0) {
         throw new Exception("Read back incorrect result: " + c.toString() + " vs " + cc.toString());
       }
     } finally {

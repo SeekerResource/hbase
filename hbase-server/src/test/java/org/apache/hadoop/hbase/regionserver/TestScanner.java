@@ -54,7 +54,6 @@ import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.InclusiveStopFilter;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.WhileMatchFilter;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -69,7 +68,7 @@ import org.junit.rules.TestName;
 @Category({RegionServerTests.class, SmallTests.class})
 public class TestScanner {
   @Rule public TestName name = new TestName();
-  private final Log LOG = LogFactory.getLog(this.getClass());
+  private static final Log LOG = LogFactory.getLog(TestScanner.class);
   private final static HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
 
   private static final byte [] FIRST_ROW = HConstants.EMPTY_START_ROW;
@@ -100,7 +99,7 @@ public class TestScanner {
 
   private static final long START_CODE = Long.MAX_VALUE;
 
-  private HRegion r;
+  private Region r;
   private HRegionIncommon region;
 
   private byte[] firstRowBytes, secondRowBytes, thirdRowBytes;
@@ -137,7 +136,7 @@ public class TestScanner {
 
       InternalScanner s = r.getScanner(scan);
       int count = 0;
-      while (NextState.hasMoreValues(s.next(results))) {
+      while (s.next(results)) {
         count++;
       }
       s.close();
@@ -150,7 +149,7 @@ public class TestScanner {
       count = 0;
       Cell kv = null;
       results = new ArrayList<Cell>();
-      for (boolean first = true; NextState.hasMoreValues(s.next(results));) {
+      for (boolean first = true; s.next(results);) {
         kv = results.get(0);
         if (first) {
           assertTrue(CellUtil.matchingRow(kv,  startrow));
@@ -173,7 +172,7 @@ public class TestScanner {
     InternalScanner s = r.getScanner(scan);
     boolean hasMore = true;
     while (hasMore) {
-      hasMore = NextState.hasMoreValues(s.next(results));
+      hasMore = s.next(results);
       for (Cell kv : results) {
         assertEquals((byte)'a', CellUtil.cloneRow(kv)[0]);
         assertEquals((byte)'b', CellUtil.cloneRow(kv)[1]);
@@ -189,7 +188,7 @@ public class TestScanner {
     InternalScanner s = r.getScanner(scan);
     boolean hasMore = true;
     while (hasMore) {
-      hasMore = NextState.hasMoreValues(s.next(results));
+      hasMore = s.next(results);
       for (Cell kv : results) {
         assertTrue(Bytes.compareTo(CellUtil.cloneRow(kv), stopRow) <= 0);
       }
@@ -272,7 +271,7 @@ public class TestScanner {
 
       // Close and re-open
 
-      r.close();
+      ((HRegion)r).close();
       r = HRegion.openHRegion(r, null);
       region = new HRegionIncommon(r);
 
@@ -310,7 +309,7 @@ public class TestScanner {
 
       // Close and reopen
 
-      r.close();
+      ((HRegion)r).close();
       r = HRegion.openHRegion(r,null);
       region = new HRegionIncommon(r);
 
@@ -345,7 +344,7 @@ public class TestScanner {
 
       // Close and reopen
 
-      r.close();
+      ((HRegion)r).close();
       r = HRegion.openHRegion(r,null);
       region = new HRegionIncommon(r);
 
@@ -389,7 +388,7 @@ public class TestScanner {
           scan.addColumn(COLS[0],  EXPLICIT_COLS[ii]);
         }
         scanner = r.getScanner(scan);
-        while (NextState.hasMoreValues(scanner.next(results))) {
+        while (scanner.next(results)) {
           assertTrue(hasColumn(results, HConstants.CATALOG_FAMILY,
               HConstants.REGIONINFO_QUALIFIER));
           byte [] val = CellUtil.cloneValue(getColumn(results, HConstants.CATALOG_FAMILY,
@@ -526,17 +525,17 @@ public class TestScanner {
       /* delete column1 of firstRow */
       dc.deleteColumns(fam1, col1);
       r.delete(dc);
-      r.flushcache();
+      r.flush(true);
 
       HBaseTestCase.addContent(hri, Bytes.toString(fam1), Bytes.toString(col1),
           secondRowBytes, thirdRowBytes);
       HBaseTestCase.addContent(hri, Bytes.toString(fam2), Bytes.toString(col1),
           secondRowBytes, thirdRowBytes);
-      r.flushcache();
+      r.flush(true);
 
       InternalScanner s = r.getScanner(new Scan());
       // run a major compact, column1 of firstRow will be cleaned.
-      r.compactStores(true);
+      r.compact(true);
 
       List<Cell> results = new ArrayList<Cell>();
       s.next(results);

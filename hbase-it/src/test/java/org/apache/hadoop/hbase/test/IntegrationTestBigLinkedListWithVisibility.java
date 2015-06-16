@@ -40,11 +40,10 @@ import org.apache.hadoop.hbase.chaos.factories.MonkeyFactory;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.BufferedMutator;
 import org.apache.hadoop.hbase.client.BufferedMutatorParams;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HConnection;
-import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
@@ -134,14 +133,15 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
       if(!acl) {
         LOG.info("No ACL available.");
       }
-      Admin admin = new HBaseAdmin(getConf());
-      for (int i = 0; i < DEFAULT_TABLES_COUNT; i++) {
-        TableName tableName = IntegrationTestBigLinkedListWithVisibility.getTableName(i);
-        createTable(admin, tableName, false, acl);
+      try (Connection conn = ConnectionFactory.createConnection(getConf());
+          Admin admin = conn.getAdmin()) {
+        for (int i = 0; i < DEFAULT_TABLES_COUNT; i++) {
+          TableName tableName = IntegrationTestBigLinkedListWithVisibility.getTableName(i);
+          createTable(admin, tableName, false, acl);
+        }
+        TableName tableName = TableName.valueOf(COMMON_TABLE_NAME);
+        createTable(admin, tableName, true, acl);
       }
-      TableName tableName = TableName.valueOf(COMMON_TABLE_NAME);
-      createTable(admin, tableName, true, acl);
-      admin.close();
     }
 
     private void createTable(Admin admin, TableName tableName, boolean setVersion,
@@ -385,8 +385,8 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
 
   private void addLabels() throws Exception {
     try {
-      VisibilityClient.addLabels(util.getConfiguration(), labels.split(COMMA));
-      VisibilityClient.setAuths(util.getConfiguration(), labels.split(COMMA), USER.getName());
+      VisibilityClient.addLabels(util.getConnection(), labels.split(COMMA));
+      VisibilityClient.setAuths(util.getConnection(), labels.split(COMMA), USER.getName());
     } catch (Throwable t) {
       throw new IOException(t);
     }
@@ -450,7 +450,7 @@ public class IntegrationTestBigLinkedListWithVisibility extends IntegrationTestB
     @Override
     protected void handleFailure(Counters counters) throws IOException {
       Configuration conf = job.getConfiguration();
-      HConnection conn = HConnectionManager.getConnection(conf);
+      HConnection conn = (HConnection) ConnectionFactory.createConnection(conf);
       TableName tableName = TableName.valueOf(COMMON_TABLE_NAME);
       CounterGroup g = counters.getGroup("undef");
       Iterator<Counter> it = g.iterator();

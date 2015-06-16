@@ -28,7 +28,6 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.CoordinatedStateManagerFactory;
@@ -37,8 +36,10 @@ import org.apache.hadoop.hbase.LocalHBaseCluster;
 import org.apache.hadoop.hbase.MasterNotRunningException;
 import org.apache.hadoop.hbase.ZNodeClearer;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
+import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.apache.hadoop.hbase.util.ServerCommandLine;
@@ -95,7 +96,7 @@ public class HMasterCommandLine extends ServerCommandLine {
     if (cmd.hasOption("minRegionServers")) {
       String val = cmd.getOptionValue("minRegionServers");
       getConf().setInt("hbase.regions.server.count.min",
-                  Integer.valueOf(val));
+                  Integer.parseInt(val));
       LOG.debug("minRegionServers set to " + val);
     }
 
@@ -103,7 +104,7 @@ public class HMasterCommandLine extends ServerCommandLine {
     if (cmd.hasOption("minServers")) {
       String val = cmd.getOptionValue("minServers");
       getConf().setInt("hbase.regions.server.count.min",
-                  Integer.valueOf(val));
+                  Integer.parseInt(val));
       LOG.debug("minServers set to " + val);
     }
 
@@ -116,13 +117,13 @@ public class HMasterCommandLine extends ServerCommandLine {
     // master when we are in local/standalone mode. Useful testing)
     if (cmd.hasOption("localRegionServers")) {
       String val = cmd.getOptionValue("localRegionServers");
-      getConf().setInt("hbase.regionservers", Integer.valueOf(val));
+      getConf().setInt("hbase.regionservers", Integer.parseInt(val));
       LOG.debug("localRegionServers set to " + val);
     }
     // How many masters to startup inside this process; useful testing
     if (cmd.hasOption("masters")) {
       String val = cmd.getOptionValue("masters");
-      getConf().setInt("hbase.masters", Integer.valueOf(val));
+      getConf().setInt("hbase.masters", Integer.parseInt(val));
       LOG.debug("masters set to " + val);
     }
 
@@ -249,12 +250,16 @@ public class HMasterCommandLine extends ServerCommandLine {
 
   @SuppressWarnings("resource")
   private int stopMaster() {
-    Admin adm = null;
-    try {
-      Configuration conf = getConf();
-      // Don't try more than once
-      conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 1);
-      adm = new HBaseAdmin(getConf());
+    Configuration conf = getConf();
+    // Don't try more than once
+    conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 1);
+    try (Connection connection = ConnectionFactory.createConnection(conf)) {
+      try (Admin admin = connection.getAdmin()) {
+        connection.getAdmin().shutdown();
+      } catch (Throwable t) {
+        LOG.error("Failed to stop master", t);
+        return 1;
+      }
     } catch (MasterNotRunningException e) {
       LOG.error("Master not running");
       return 1;
@@ -263,12 +268,6 @@ public class HMasterCommandLine extends ServerCommandLine {
       return 1;
     } catch (IOException e) {
       LOG.error("Got IOException: " +e.getMessage(), e);
-      return 1;
-    }
-    try {
-      adm.shutdown();
-    } catch (Throwable t) {
-      LOG.error("Failed to stop master", t);
       return 1;
     }
     return 0;

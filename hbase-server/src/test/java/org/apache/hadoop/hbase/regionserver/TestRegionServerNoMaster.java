@@ -125,9 +125,9 @@ public class TestRegionServerNoMaster {
   /** Flush the given region in the mini cluster. Since no master, we cannot use HBaseAdmin.flush() */
   public static void flushRegion(HBaseTestingUtility HTU, HRegionInfo regionInfo) throws IOException {
     for (RegionServerThread rst : HTU.getMiniHBaseCluster().getRegionServerThreads()) {
-      HRegion region = rst.getRegionServer().getRegionByEncodedName(regionInfo.getEncodedName());
+      Region region = rst.getRegionServer().getRegionByEncodedName(regionInfo.getEncodedName());
       if (region != null) {
-        region.flushcache();
+        region.flush(true);
         return;
       }
     }
@@ -259,7 +259,7 @@ public class TestRegionServerNoMaster {
     // Let's start the open handler
     HTableDescriptor htd = getRS().tableDescriptors.get(hri.getTable());
 
-    getRS().service.submit(new OpenRegionHandler(getRS(), getRS(), hri, htd));
+    getRS().service.submit(new OpenRegionHandler(getRS(), getRS(), hri, htd, -1));
 
     // The open handler should have removed the region from RIT but kept the region closed
     checkRegionIsClosed(HTU, getRS(), hri);

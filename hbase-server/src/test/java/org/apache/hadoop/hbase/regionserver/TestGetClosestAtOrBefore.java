@@ -41,10 +41,10 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.wal.WAL;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
@@ -75,7 +75,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     // Up flush size else we bind up when we use default catalog flush of 16k.
     fsTableDescriptors.get(TableName.META_TABLE_NAME).setMemStoreFlushSize(64 * 1024 * 1024);
 
-    HRegion mr = HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO,
+    Region mr = HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO,
         rootdir, this.conf, fsTableDescriptors.get(TableName.META_TABLE_NAME));
     try {
     // Write rows for three tables 'A', 'B', and 'C'.
@@ -96,7 +96,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     InternalScanner s = mr.getScanner(new Scan());
     try {
       List<Cell> keys = new ArrayList<Cell>();
-        while (NextState.hasMoreValues(s.next(keys))) {
+        while (s.next(keys)) {
         LOG.info(keys);
         keys.clear();
       }
@@ -107,7 +107,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     findRow(mr, 'C', 45, 44);
     findRow(mr, 'C', 46, 46);
     findRow(mr, 'C', 43, 42);
-    mr.flushcache();
+    mr.flush(true);
     findRow(mr, 'C', 44, 44);
     findRow(mr, 'C', 45, 44);
     findRow(mr, 'C', 46, 46);
@@ -120,7 +120,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     s = mr.getScanner(scan);
     try {
       List<Cell> keys = new ArrayList<Cell>();
-        while (NextState.hasMoreValues(s.next(keys))) {
+        while (s.next(keys)) {
         mr.delete(new Delete(CellUtil.cloneRow(keys.get(0))));
         keys.clear();
       }
@@ -132,7 +132,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     findRow(mr, 'C', 45, -1);
     findRow(mr, 'C', 46, -1);
     findRow(mr, 'C', 43, -1);
-    mr.flushcache();
+    mr.flush(true);
     findRow(mr, 'C', 44, -1);
     findRow(mr, 'C', 45, -1);
     findRow(mr, 'C', 46, -1);
@@ -150,7 +150,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
    * @return Row found.
    * @throws IOException
    */
-  private byte [] findRow(final HRegion mr, final char table,
+  private byte [] findRow(final Region mr, final char table,
     final int rowToFind, final int answer)
   throws IOException {
     TableName tableb = TableName.valueOf("" + table);
@@ -160,7 +160,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
         tableb, tofindBytes,
       HConstants.NINES, false);
     LOG.info("find=" + new String(metaKey));
-    Result r = mr.getClosestRowBefore(metaKey);
+    Result r = mr.getClosestRowBefore(metaKey, HConstants.CATALOG_FAMILY);
     if (answer == -1) {
       assertNull(r);
       return null;
@@ -171,9 +171,9 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
   }
 
   private byte [] extractRowFromMetaRow(final byte [] b) {
-    int firstDelimiter = KeyValue.getDelimiter(b, 0, b.length,
+    int firstDelimiter = Bytes.searchDelimiterIndex(b, 0, b.length,
       HConstants.DELIMITER);
-    int lastDelimiter = KeyValue.getDelimiterInReverse(b, 0, b.length,
+    int lastDelimiter = Bytes.searchDelimiterIndexInReverse(b, 0, b.length,
       HConstants.DELIMITER);
     int length = lastDelimiter - firstDelimiter - 1;
     byte [] row = new byte[length];
@@ -187,7 +187,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
    */
   @Test
   public void testGetClosestRowBefore3() throws IOException{
-    HRegion region = null;
+    Region region = null;
     byte [] c0 = COLUMNS[0];
     byte [] c1 = COLUMNS[1];
     try {
@@ -232,7 +232,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
       r = region.getClosestRowBefore(T31, c0);
       assertTrue(Bytes.equals(T10, r.getRow()));
 
-      region.flushcache();
+      region.flush(true);
 
       // try finding "010" after flush
       r = region.getClosestRowBefore(T30, c0);
@@ -250,7 +250,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
       r = region.getClosestRowBefore(T31, c0);
       assertTrue(Bytes.equals(T10, r.getRow()));
 
-      region.flushcache();
+      region.flush(true);
 
       r = region.getClosestRowBefore(T30, c0);
       assertTrue(Bytes.equals(T10, r.getRow()));
@@ -268,7 +268,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
       // Ask for a value off the end of the file.  Should return t10.
       r = region.getClosestRowBefore(T31, c0);
       assertTrue(Bytes.equals(T10, r.getRow()));
-      region.flushcache();
+      region.flush(true);
       r = region.getClosestRowBefore(T31, c0);
       assertTrue(Bytes.equals(T10, r.getRow()));
 
@@ -284,11 +284,12 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     } finally {
       if (region != null) {
         try {
-          region.close();
+          WAL wal = ((HRegion)region).getWAL();
+          ((HRegion)region).close();
+          wal.close();
         } catch (Exception e) {
           e.printStackTrace();
         }
-        region.getWAL().close();
       }
     }
   }
@@ -296,7 +297,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
   /** For HBASE-694 */
   @Test
   public void testGetClosestRowBefore2() throws IOException{
-    HRegion region = null;
+    Region region = null;
     byte [] c0 = COLUMNS[0];
     try {
       HTableDescriptor htd = createTableDescriptor(getName());
@@ -318,7 +319,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
       Result r = region.getClosestRowBefore(T35, c0);
       assertTrue(Bytes.equals(T30, r.getRow()));
 
-      region.flushcache();
+      region.flush(true);
 
       // try finding "035"
       r = region.getClosestRowBefore(T35, c0);
@@ -332,7 +333,7 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
       r = region.getClosestRowBefore(T35, c0);
       assertTrue(Bytes.equals(T30, r.getRow()));
 
-      region.flushcache();
+      region.flush(true);
 
       // try finding "035"
       r = region.getClosestRowBefore(T35, c0);
@@ -340,11 +341,12 @@ public class TestGetClosestAtOrBefore extends HBaseTestCase {
     } finally {
       if (region != null) {
         try {
-          region.close();
+          WAL wal = ((HRegion)region).getWAL();
+          ((HRegion)region).close();
+          wal.close();
         } catch (Exception e) {
           e.printStackTrace();
         }
-        region.getWAL().close();
       }
     }
   }

@@ -34,7 +34,7 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -61,7 +61,7 @@ public class TestInvocationRecordFilter {
   private static final String VALUE_PREFIX = "value";
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private HRegion region;
+  private Region region;
 
   @Before
   public void setUp() throws Exception {
@@ -79,7 +79,7 @@ public class TestInvocationRecordFilter {
           Bytes.toBytes(VALUE_PREFIX + i));
     }
     this.region.put(put);
-    this.region.flushcache();
+    this.region.flush(true);
   }
 
   @Test
@@ -139,7 +139,7 @@ public class TestInvocationRecordFilter {
     List<Cell> actualValues = new ArrayList<Cell>();
     List<Cell> temp = new ArrayList<Cell>();
     InternalScanner scanner = this.region.getScanner(scan);
-    while (NextState.hasMoreValues(scanner.next(temp))) {
+    while (scanner.next(temp)) {
       actualValues.addAll(temp);
       temp.clear();
     }
@@ -151,8 +151,8 @@ public class TestInvocationRecordFilter {
 
   @After
   public void tearDown() throws Exception {
-    WAL wal = region.getWAL();
-    region.close();
+    WAL wal = ((HRegion)region).getWAL();
+    ((HRegion)region).close();
     wal.close();
   }
 

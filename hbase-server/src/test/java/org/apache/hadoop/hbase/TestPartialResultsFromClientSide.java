@@ -24,7 +24,9 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -35,6 +37,11 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.filter.ColumnPrefixFilter;
+import org.apache.hadoop.hbase.filter.ColumnRangeFilter;
+import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+import org.apache.hadoop.hbase.filter.FirstKeyValueMatchingQualifiersFilter;
 import org.apache.hadoop.hbase.filter.RandomRowFilter;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -210,7 +217,8 @@ public class TestPartialResultsFromClientSide {
       count++;
     }
 
-    assertTrue(scanner2.next() == null);
+    r2 = scanner2.next();
+    assertTrue("r2: " + r2 + " Should be null", r2 == null);
 
     scanner1.close();
     scanner2.close();
@@ -402,6 +410,7 @@ public class TestPartialResultsFromClientSide {
     scan.setBatch(batch);
     ResultScanner scanner = TABLE.getScanner(scan);
     Result result = scanner.next();
+    int repCount = 0;
 
     while ((result = scanner.next()) != null) {
       assertTrue(result.rawCells() != null);
@@ -409,11 +418,12 @@ public class TestPartialResultsFromClientSide {
       if (result.isPartial()) {
         final String error =
             "Cells:" + result.rawCells().length + " Batch size:" + batch
-                + " cellsPerPartialResult:" + cellsPerPartialResult;
+                + " cellsPerPartialResult:" + cellsPerPartialResult + " rep:" + repCount;
         assertTrue(error, result.rawCells().length <= Math.min(batch, cellsPerPartialResult));
       } else {
         assertTrue(result.rawCells().length <= batch);
       }
+      repCount++;
     }
 
     scanner.close();
@@ -451,7 +461,7 @@ public class TestPartialResultsFromClientSide {
       do {
         partialResult = partialScanner.next();
         partials.add(partialResult);
-      } while (partialResult.isPartial());
+      } while (partialResult != null && partialResult.isPartial());
 
       completeResult = Result.createCompleteResult(partials);
       oneShotResult = oneShotScanner.next();
@@ -501,7 +511,7 @@ public class TestPartialResultsFromClientSide {
    * because the entire row needs to be read for the include/exclude decision to be made
    */
   @Test
-  public void testNoPartialResultsWhenFilterPresent() throws Exception {
+  public void testNoPartialResultsWhenRowFilterPresent() throws Exception {
     Scan scan = new Scan();
     scan.setMaxResultSize(1);
     scan.setAllowPartialResults(true);
@@ -689,7 +699,7 @@ public class TestPartialResultsFromClientSide {
       LOG.info("r2: " + r2);
     }
 
-    final String failureMessage = "Results r1:" + r1 + " r2:" + r2 + " are not equivalent";
+    final String failureMessage = "Results r1:" + r1 + " \nr2:" + r2 + " are not equivalent";
     if (r1 == null && r2 == null) fail(failureMessage);
     else if (r1 == null || r2 == null) fail(failureMessage);
 
@@ -783,5 +793,40 @@ public class TestPartialResultsFromClientSide {
 
     scanner.close();
     return numCells;
+  }
+
+  /**
+   * Test partial Result re-assembly in the presence of different filters. The Results from the
+   * partial scanner should match the Results returned from a scanner that receives all of the
+   * results in one RPC to the server. The partial scanner is tested with a variety of different
+   * result sizes (all of which are less than the size necessary to fetch an entire row)
+   * @throws Exception
+   */
+  @Test
+  public void testPartialResultsWithColumnFilter() throws Exception {
+    testPartialResultsWithColumnFilter(new FirstKeyOnlyFilter());
+    testPartialResultsWithColumnFilter(new ColumnPrefixFilter(Bytes.toBytes("testQualifier5")));
+    testPartialResultsWithColumnFilter(new ColumnRangeFilter(Bytes.toBytes("testQualifer1"), true,
+        Bytes.toBytes("testQualifier7"), true));
+
+    Set<byte[]> qualifiers = new LinkedHashSet<>();
+    qualifiers.add(Bytes.toBytes("testQualifier5"));
+    testPartialResultsWithColumnFilter(new FirstKeyValueMatchingQualifiersFilter(qualifiers));
+  }
+
+  public void testPartialResultsWithColumnFilter(Filter filter) throws Exception {
+    assertTrue(!filter.hasFilterRow());
+
+    Scan partialScan = new Scan();
+    partialScan.setFilter(filter);
+
+    Scan oneshotScan = new Scan();
+    oneshotScan.setFilter(filter);
+    oneshotScan.setMaxResultSize(Long.MAX_VALUE);
+
+    for (int i = 1; i <= NUM_COLS; i++) {
+      partialScan.setMaxResultSize(getResultSizeForNumberOfCells(i));
+      testEquivalenceOfScanResults(TABLE, partialScan, oneshotScan);
+    }
   }
 }

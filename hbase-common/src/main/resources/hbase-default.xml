@@ -63,6 +63,20 @@ possible configurations would overwhelm and obscure the important.
     machine restart.</description>
   </property>
   <property >
+    <name>hbase.fs.tmp.dir</name>
+    <value>/user/${user.name}/hbase-staging</value>
+    <description>A staging directory in default file system (HDFS)
+    for keeping temporary data.
+    </description>
+  </property>
+  <property >
+    <name>hbase.bulkload.staging.dir</name>
+    <value>${hbase.fs.tmp.dir}</value>
+    <description>A staging directory in default file system (HDFS)
+    for bulk loading.
+    </description>
+  </property>
+  <property >
     <name>hbase.cluster.distributed</name>
     <value>false</value>
     <description>The mode the cluster will be in. Possible values are
@@ -96,6 +110,11 @@ possible configurations would overwhelm and obscure the important.
   </property>
 
   <!--Master configurations-->
+  <property >
+    <name>hbase.master.port</name>
+    <value>16000</value>
+    <description>The port the HBase Master should bind to.</description>
+  </property>
   <property>
     <name>hbase.master.info.port</name>
     <value>16010</value>
@@ -240,14 +259,6 @@ possible configurations would overwhelm and obscure the important.
     in milliseconds.</description>
   </property>
   <property>
-    <name>hbase.regionserver.regionSplitLimit</name>
-    <value>2147483647</value>
-    <description>Limit for the number of regions after which no more region
-    splitting should take place. This is not a hard limit for the number of
-    regions but acts as a guideline for the regionserver to stop splitting after
-    a certain limit. Default is MAX_INT; i.e. do not block splitting.</description>
-  </property>
-  <property>
     <name>hbase.regionserver.logroll.period</name>
     <value>3600000</value>
     <description>Period at which we will roll the commit log regardless
@@ -285,19 +296,23 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.regionserver.global.memstore.size</name>
-    <value>0.4</value>
+    <value></value>
     <description>Maximum size of all memstores in a region server before new
-      updates are blocked and flushes are forced. Defaults to 40% of heap.
+      updates are blocked and flushes are forced. Defaults to 40% of heap (0.4).
       Updates are blocked and flushes are forced until size of all memstores
-      in a region server hits hbase.regionserver.global.memstore.size.lower.limit.</description>
+      in a region server hits hbase.regionserver.global.memstore.size.lower.limit.
+      The default value in this configuration has been intentionally left emtpy in order to
+      honor the old hbase.regionserver.global.memstore.upperLimit property if present.</description>
   </property>
   <property>
     <name>hbase.regionserver.global.memstore.size.lower.limit</name>
-    <value>0.95</value>
+    <value></value>
     <description>Maximum size of all memstores in a region server before flushes are forced.
-      Defaults to 95% of hbase.regionserver.global.memstore.size.
+      Defaults to 95% of hbase.regionserver.global.memstore.size (0.95).
       A 100% value for this value causes the minimum possible flushing to occur when updates are 
-      blocked due to memstore limiting.</description>
+      blocked due to memstore limiting.
+      The default value in this configuration has been intentionally left emtpy in order to
+      honor the old hbase.regionserver.global.memstore.lowerLimit property if present.</description>
   </property>
   <property>
     <name>hbase.regionserver.optionalcacheflushinterval</name>
@@ -421,15 +436,7 @@ possible configurations would overwhelm and obscure the important.
     and will not be downgraded.  ZooKeeper versions before 3.4 do not support multi-update and
     will not fail gracefully if multi-update is invoked (see ZOOKEEPER-1495).</description>
   </property>
-  <property>
-    <name>hbase.config.read.zookeeper.config</name>
-    <value>false</value>
-    <description>
-        Set to true to allow HBaseConfiguration to read the
-        zoo.cfg file for ZooKeeper properties. Switching this to true
-        is not recommended, since the functionality of reading ZK
-        properties from a zoo.cfg file has been deprecated.</description>
-  </property>
+
   <!--
   Beginning of properties that are directly mapped from ZooKeeper's zoo.cfg.
   All properties with an "hbase.zookeeper.property." prefix are converted for
@@ -908,6 +915,18 @@ possible configurations would overwhelm and obscure the important.
         but will eventually throw a TimeoutException.</description>
   </property>
   <property>
+    <name>hbase.cells.scanned.per.heartbeat.check</name>
+    <value>10000</value>
+    <description>The number of cells scanned in between heartbeat checks. Heartbeat
+        checks occur during the processing of scans to determine whether or not the
+        server should stop scanning in order to send back a heartbeat message to the
+        client. Heartbeat messages are used to keep the client-server connection alive
+        during long running scans. Small values mean that the heartbeat checks will
+        occur more often and thus will provide a tighter bound on the execution time of
+        the scan. Larger values mean that the heartbeat checks occur less frequently
+        </description>
+  </property>
+  <property>
     <name>hbase.rpc.shortoperation.timeout</name>
     <value>10000</value>
     <description>This is another version of "hbase.rpc.timeout". For those RPC operation
@@ -920,6 +939,13 @@ possible configurations would overwhelm and obscure the important.
     <value>true</value>
     <description>Set no delay on rpc socket connections.  See
     http://docs.oracle.com/javase/1.5.0/docs/api/java/net/Socket.html#getTcpNoDelay()</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.hostname</name>
+    <value></value>
+    <description>This config is for experts: don't set its value unless you really know what you are doing.
+    When set to a non-empty value, this represents the (external facing) hostname for the underlying server.
+    See https://issues.apache.org/jira/browse/HBASE-12954 for details.</description>
   </property>
   <!-- The following properties configure authentication information for
        HBase processes when using Kerberos security.  There are no default
@@ -1167,6 +1193,13 @@ possible configurations would overwhelm and obscure the important.
     <description>Use Thrift TCompactProtocol binary serialization protocol.</description>
   </property>
   <property>
+    <name>hbase.rootdir.perms</name>
+    <value>700</value>
+    <description>FS Permissions for the root directory in a secure(kerberos) setup.
+    When master starts, it creates the rootdir with this permissions or sets the permissions
+    if it does not match.</description>
+  </property>
+  <property>
     <name>hbase.data.umask.enable</name>
     <value>false</value>
     <description>Enable, if true, that file permissions should be assigned
@@ -1282,7 +1315,7 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.hstore.checksum.algorithm</name>
-    <value>CRC32</value>
+    <value>CRC32C</value>
     <description>
       Name of an algorithm that is used to compute checksums. Possible values
       are NULL, CRC32, CRC32C.
@@ -1296,6 +1329,16 @@ possible configurations would overwhelm and obscure the important.
     Note that when a single row is larger than this limit the row is still returned completely.
     The default value is 2MB, which is good for 1ge networks.
     With faster and/or high latency networks this value should be increased.
+    </description>
+  </property>
+
+  <property>
+    <name>hbase.server.scanner.max.result.size</name>
+    <value>104857600</value>
+    <description>Maximum number of bytes returned when calling a scanner's next method.
+    Note that when a single row is larger than this limit the row is still returned completely.
+    The default value is 100MB.
+    This is a safety setting to protect the server from OOM situations.
     </description>
   </property>
 

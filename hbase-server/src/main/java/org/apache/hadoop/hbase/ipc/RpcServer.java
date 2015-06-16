@@ -91,11 +91,13 @@ import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ExceptionResponse;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.RequestHeader;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ResponseHeader;
 import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.UserInformation;
+import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.VersionInfo;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
 import org.apache.hadoop.hbase.security.AuthMethod;
 import org.apache.hadoop.hbase.security.HBasePolicyProvider;
 import org.apache.hadoop.hbase.security.HBaseSaslRpcServer;
+import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.HBaseSaslRpcServer.SaslDigestCallbackHandler;
 import org.apache.hadoop.hbase.security.HBaseSaslRpcServer.SaslGssCallbackHandler;
 import org.apache.hadoop.hbase.security.SaslStatus;
@@ -155,7 +157,10 @@ import com.google.protobuf.TextFormat;
 @InterfaceAudience.LimitedPrivate({HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX})
 @InterfaceStability.Evolving
 public class RpcServer implements RpcServerInterface {
+  // LOG is being used in CallRunner and the log level is being changed in tests
   public static final Log LOG = LogFactory.getLog(RpcServer.class);
+  private static final CallQueueTooBigException CALL_QUEUE_TOO_BIG_EXCEPTION
+      = new CallQueueTooBigException();
 
   private final boolean authorize;
   private boolean isSecurityEnabled;
@@ -299,9 +304,12 @@ public class RpcServer implements RpcServerInterface {
     protected TraceInfo tinfo;
     private ByteBuffer cellBlock = null;
 
+    private User user;
+    private InetAddress remoteAddress;
+
     Call(int id, final BlockingService service, final MethodDescriptor md, RequestHeader header,
          Message param, CellScanner cellScanner, Connection connection, Responder responder,
-         long size, TraceInfo tinfo) {
+         long size, TraceInfo tinfo, final InetAddress remoteAddress) {
       this.id = id;
       this.service = service;
       this.md = md;
@@ -316,6 +324,8 @@ public class RpcServer implements RpcServerInterface {
       this.isError = false;
       this.size = size;
       this.tinfo = tinfo;
+      this.user = connection.user == null? null: userProvider.create(connection.user);
+      this.remoteAddress = remoteAddress;
     }
 
     /**
@@ -393,7 +403,7 @@ public class RpcServer implements RpcServerInterface {
           // Set the exception as the result of the method invocation.
           headerBuilder.setException(exceptionBuilder.build());
         }
-        // Pass reservoir to buildCellBlock. Keep reference to returne so can add it back to the 
+        // Pass reservoir to buildCellBlock. Keep reference to returne so can add it back to the
         // reservoir when finished. This is hacky and the hack is not contained but benefits are
         // high when we can avoid a big buffer allocation on each rpc.
         this.cellBlock = ipcUtil.buildCellBlock(this.connection.codec,
@@ -521,6 +531,27 @@ public class RpcServer implements RpcServerInterface {
 
     public UserGroupInformation getRemoteUser() {
       return connection.user;
+    }
+
+    @Override
+    public User getRequestUser() {
+      return user;
+    }
+
+    @Override
+    public String getRequestUserName() {
+      User user = getRequestUser();
+      return user == null? null: user.getShortName();
+    }
+
+    @Override
+    public InetAddress getRemoteAddress() {
+      return remoteAddress;
+    }
+
+    @Override
+    public VersionInfo getClientVersionInfo() {
+      return connection.getVersionInfo();
     }
   }
 
@@ -1196,13 +1227,14 @@ public class RpcServer implements RpcServerInterface {
     // Fake 'call' for failed authorization response
     private static final int AUTHORIZATION_FAILED_CALLID = -1;
     private final Call authFailedCall =
-      new Call(AUTHORIZATION_FAILED_CALLID, null, null, null, null, null, this, null, 0, null);
+      new Call(AUTHORIZATION_FAILED_CALLID, null, null, null, null, null, this, null, 0, null,
+        null);
     private ByteArrayOutputStream authFailedResponse =
         new ByteArrayOutputStream();
     // Fake 'call' for SASL context setup
     private static final int SASL_CALLID = -33;
     private final Call saslCall =
-      new Call(SASL_CALLID, this.service, null, null, null, null, this, null, 0, null);
+      new Call(SASL_CALLID, this.service, null, null, null, null, this, null, 0, null, null);
 
     public UserGroupInformation attemptingUser = null; // user name before auth
 
@@ -1248,6 +1280,13 @@ public class RpcServer implements RpcServerInterface {
 
     public void setLastContact(long lastContact) {
       this.lastContact = lastContact;
+    }
+
+    public VersionInfo getVersionInfo() {
+      if (connectionHeader.hasVersionInfo()) {
+        return connectionHeader.getVersionInfo();
+      }
+      return null;
     }
 
     /* Return true if the connection has no outstanding rpc */
@@ -1429,6 +1468,7 @@ public class RpcServer implements RpcServerInterface {
           saslServer.dispose();
           saslServer = null;
         } catch (SaslException ignored) {
+          // Ignored. This is being disposed of anyway.
         }
       }
     }
@@ -1506,7 +1546,7 @@ public class RpcServer implements RpcServerInterface {
       // Else it will be length of the data to read (or -1 if a ping).  We catch the integer
       // length into the 4-byte this.dataLengthBuffer.
       int count = read4Bytes();
-      if (count < 0 || dataLengthBuffer.remaining() > 0 ){
+      if (count < 0 || dataLengthBuffer.remaining() > 0) {
         return count;
       }
 
@@ -1590,7 +1630,7 @@ public class RpcServer implements RpcServerInterface {
 
     private int doBadPreambleHandling(final String msg, final Exception e) throws IOException {
       LOG.warn(msg);
-      Call fakeCall = new Call(-1, null, null, null, null, null, this, responder, -1, null);
+      Call fakeCall = new Call(-1, null, null, null, null, null, this, responder, -1, null, null);
       setupResponse(null, fakeCall, e, msg);
       responder.doRespond(fakeCall);
       // Returning -1 closes out the connection.
@@ -1635,6 +1675,14 @@ public class RpcServer implements RpcServerInterface {
             user.setAuthenticationMethod(AuthenticationMethod.PROXY);
           }
         }
+      }
+      if (connectionHeader.hasVersionInfo()) {
+        AUDITLOG.info("Connection from " + this.hostAddress + " port: " + this.remotePort
+            + " with version info: "
+            + TextFormat.shortDebugString(connectionHeader.getVersionInfo()));
+      } else {
+        AUDITLOG.info("Connection from " + this.hostAddress + " port: " + this.remotePort
+            + " with unknown version info");
       }
     }
 
@@ -1741,11 +1789,12 @@ public class RpcServer implements RpcServerInterface {
       if ((totalRequestSize + callQueueSize.get()) > maxQueueSize) {
         final Call callTooBig =
           new Call(id, this.service, null, null, null, null, this,
-            responder, totalRequestSize, null);
+            responder, totalRequestSize, null, null);
         ByteArrayOutputStream responseBuffer = new ByteArrayOutputStream();
-        setupResponse(responseBuffer, callTooBig, new CallQueueTooBigException(),
-          "Call queue is full on " + getListenerAddress() +
-          ", is hbase.ipc.server.max.callqueue.size too small?");
+        metrics.exception(CALL_QUEUE_TOO_BIG_EXCEPTION);
+        setupResponse(responseBuffer, callTooBig, CALL_QUEUE_TOO_BIG_EXCEPTION,
+            "Call queue is full on " + getListenerAddress() +
+                ", is hbase.ipc.server.max.callqueue.size too small?");
         responder.doRespond(callTooBig);
         return;
       }
@@ -1775,6 +1824,8 @@ public class RpcServer implements RpcServerInterface {
             getHostAddress();
         LOG.warn(msg, t);
 
+        metrics.exception(t);
+
         // probably the hbase hadoop version does not match the running hadoop version
         if (t instanceof LinkageError) {
           t = new DoNotRetryIOException(t);
@@ -1786,7 +1837,7 @@ public class RpcServer implements RpcServerInterface {
 
         final Call readParamsFailedCall =
           new Call(id, this.service, null, null, null, null, this,
-            responder, totalRequestSize, null);
+            responder, totalRequestSize, null, null);
         ByteArrayOutputStream responseBuffer = new ByteArrayOutputStream();
         setupResponse(responseBuffer, readParamsFailedCall, t,
           msg + "; " + t.getMessage());
@@ -1798,9 +1849,8 @@ public class RpcServer implements RpcServerInterface {
           ? new TraceInfo(header.getTraceInfo().getTraceId(), header.getTraceInfo().getParentId())
           : null;
       Call call = new Call(id, this.service, md, header, param, cellScanner, this, responder,
-              totalRequestSize,
-              traceInfo);
-      scheduler.dispatch(new CallRunner(RpcServer.this, call, userProvider));
+              totalRequestSize, traceInfo, RpcServer.getRemoteIp());
+      scheduler.dispatch(new CallRunner(RpcServer.this, call));
     }
 
     private boolean authorizeConnection() throws IOException {
@@ -2063,16 +2113,20 @@ public class RpcServer implements RpcServerInterface {
       long startTime = System.currentTimeMillis();
       PayloadCarryingRpcController controller = new PayloadCarryingRpcController(cellScanner);
       Message result = service.callBlockingMethod(md, controller, param);
-      int processingTime = (int) (System.currentTimeMillis() - startTime);
+      long endTime = System.currentTimeMillis();
+      int processingTime = (int) (endTime - startTime);
       int qTime = (int) (startTime - receiveTime);
+      int totalTime = (int) (endTime - receiveTime);
       if (LOG.isTraceEnabled()) {
         LOG.trace(CurCall.get().toString() +
             ", response " + TextFormat.shortDebugString(result) +
             " queueTime: " + qTime +
-            " processingTime: " + processingTime);
+            " processingTime: " + processingTime +
+            " totalTime: " + totalTime);
       }
       metrics.dequeuedCall(qTime);
       metrics.processedCall(processingTime);
+      metrics.totalCall(totalTime);
       long responseSize = result.getSerializedSize();
       // log any RPC responses that are slower than the configured warn
       // response time or larger than configured warning size
@@ -2093,6 +2147,10 @@ public class RpcServer implements RpcServerInterface {
       // putting it on the wire.  Its needed to adhere to the pb Service Interface but we don't
       // need to pass it over the wire.
       if (e instanceof ServiceException) e = e.getCause();
+
+      // increment the number of requests that were exceptions.
+      metrics.exception(e);
+
       if (e instanceof LinkageError) throw new DoNotRetryIOException(e);
       if (e instanceof IOException) throw (IOException)e;
       LOG.error("Unexpected throwable object ", e);
@@ -2331,6 +2389,37 @@ public class RpcServer implements RpcServerInterface {
    */
   public static RpcCallContext getCurrentCall() {
     return CurCall.get();
+  }
+
+  public static boolean isInRpcCallContext() {
+    return CurCall.get() != null;
+  }
+
+  /**
+   * Returns the user credentials associated with the current RPC request or
+   * <code>null</code> if no credentials were provided.
+   * @return A User
+   */
+  public static User getRequestUser() {
+    RpcCallContext ctx = getCurrentCall();
+    return ctx == null? null: ctx.getRequestUser();
+  }
+
+  /**
+   * Returns the username for any user associated with the current RPC
+   * request or <code>null</code> if no user is set.
+   */
+  public static String getRequestUserName() {
+    User user = getRequestUser();
+    return user == null? null: user.getShortName();
+  }
+
+  /**
+   * @return Address of remote client if a request is ongoing, else null
+   */
+  public static InetAddress getRemoteAddress() {
+    RpcCallContext ctx = getCurrentCall();
+    return ctx == null? null: ctx.getRemoteAddress();
   }
 
   /**

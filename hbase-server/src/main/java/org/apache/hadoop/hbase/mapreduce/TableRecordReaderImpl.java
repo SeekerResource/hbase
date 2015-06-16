@@ -49,7 +49,7 @@ public class TableRecordReaderImpl {
   public static final String LOG_PER_ROW_COUNT
     = "hbase.mapreduce.log.scanner.rowcount";
 
-  static final Log LOG = LogFactory.getLog(TableRecordReaderImpl.class);
+  private static final Log LOG = LogFactory.getLog(TableRecordReaderImpl.class);
 
   // HBASE_COUNTER_GROUP_NAME is the name of mapreduce counter group for HBase
   private static final String HBASE_COUNTER_GROUP_NAME =
@@ -139,7 +139,8 @@ public class TableRecordReaderImpl {
   /**
    * Build the scanner. Not done in constructor to allow for extension.
    *
-   * @throws IOException, InterruptedException
+   * @throws IOException
+   * @throws InterruptedException
    */
   public void initialize(InputSplit inputsplit,
       TaskAttemptContext context) throws IOException,

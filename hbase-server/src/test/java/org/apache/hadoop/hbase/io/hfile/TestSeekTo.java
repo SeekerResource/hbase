@@ -23,6 +23,7 @@ import java.io.IOException;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.HBaseTestCase;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
@@ -73,18 +74,13 @@ public class TestSeekTo extends HBaseTestCase {
 
   Path makeNewFile(TagUsage tagUsage) throws IOException {
     Path ncTFile = new Path(testDir, "basic.hfile");
-    if (tagUsage != TagUsage.NO_TAG) {
-      conf.setInt("hfile.format.version", 3);
-    } else {
-      conf.setInt("hfile.format.version", 2);
-    }
     FSDataOutputStream fout = this.fs.create(ncTFile);
     int blocksize = toKV("a", tagUsage).getLength() * 3;
     HFileContext context = new HFileContextBuilder().withBlockSize(blocksize)
         .withIncludesTags(true).build();
     HFile.Writer writer = HFile.getWriterFactoryNoCache(conf).withOutputStream(fout)
         .withFileContext(context)
-        .withComparator(KeyValue.COMPARATOR).create();
+        .withComparator(CellComparator.COMPARATOR).create();
     // 4 bytes * 3 * 2 for each key/value +
     // 3 for keys, 15 for values = 42 (woot)
     writer.append(toKV("c", tagUsage));
@@ -142,7 +138,7 @@ public class TestSeekTo extends HBaseTestCase {
 
   @Test
   public void testSeekBeforeWithReSeekTo() throws Exception {
-    testSeekBeforeWithReSeekToInternals(TagUsage.NO_TAG);
+    testSeekBeforeInternals(TagUsage.NO_TAG);
     testSeekBeforeWithReSeekToInternals(TagUsage.ONLY_TAG);
     testSeekBeforeWithReSeekToInternals(TagUsage.PARTIAL_TAG);
   }
@@ -232,7 +228,7 @@ public class TestSeekTo extends HBaseTestCase {
 
   @Test
   public void testSeekTo() throws Exception {
-    testSeekToInternals(TagUsage.NO_TAG);
+    testSeekBeforeInternals(TagUsage.NO_TAG);
     testSeekToInternals(TagUsage.ONLY_TAG);
     testSeekToInternals(TagUsage.PARTIAL_TAG);
   }
@@ -262,7 +258,7 @@ public class TestSeekTo extends HBaseTestCase {
 
   @Test
   public void testBlockContainingKey() throws Exception {
-    testBlockContainingKeyInternals(TagUsage.NO_TAG);
+    testSeekBeforeInternals(TagUsage.NO_TAG);
     testBlockContainingKeyInternals(TagUsage.ONLY_TAG);
     testBlockContainingKeyInternals(TagUsage.PARTIAL_TAG);
   }

@@ -36,7 +36,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.master.RegionState.State;
-import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.MultiHConnection;
@@ -53,10 +53,10 @@ import com.google.common.base.Preconditions;
 public class RegionStateStore {
   private static final Log LOG = LogFactory.getLog(RegionStateStore.class);
 
-  /** The delimiter for meta columns for replicaIds > 0 */
+  /** The delimiter for meta columns for replicaIds &gt; 0 */
   protected static final char META_REPLICA_ID_DELIMITER = '_';
 
-  private volatile HRegion metaRegion;
+  private volatile Region metaRegion;
   private volatile boolean initialized;
   private MultiHConnection multiHConnection;
   private final Server server;
@@ -198,7 +198,7 @@ public class RegionStateStore {
       if (openSeqNum >= 0) {
         Preconditions.checkArgument(state == State.OPEN
           && serverName != null, "Open region should be on a server");
-        MetaTableAccessor.addLocation(put, serverName, openSeqNum, replicaId);
+        MetaTableAccessor.addLocation(put, serverName, openSeqNum, -1, replicaId);
         info.append("&openSeqNum=").append(openSeqNum);
         info.append("&server=").append(serverName);
       }

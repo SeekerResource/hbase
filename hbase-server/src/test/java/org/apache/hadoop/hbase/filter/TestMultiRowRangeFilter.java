@@ -21,12 +21,14 @@ import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
@@ -45,7 +47,7 @@ import org.junit.experimental.categories.Category;
 public class TestMultiRowRangeFilter {
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private final Log LOG = LogFactory.getLog(this.getClass());
+  private static final Log LOG = LogFactory.getLog(TestMultiRowRangeFilter.class);
   private byte[] family = Bytes.toBytes("family");
   private byte[] qf = Bytes.toBytes("qf");
   private byte[] value = Bytes.toBytes("val");
@@ -66,6 +68,24 @@ public class TestMultiRowRangeFilter {
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
     TEST_UTIL.shutdownMiniCluster();
+  }
+
+  @Test
+  public void testOutOfOrderScannerNextException() throws Exception {
+    MultiRowRangeFilter filter = new MultiRowRangeFilter(Arrays.asList(
+            new MultiRowRangeFilter.RowRange(Bytes.toBytes("b"), true, Bytes.toBytes("c"), true),
+            new MultiRowRangeFilter.RowRange(Bytes.toBytes("d"), true, Bytes.toBytes("e"), true)
+    ));
+    filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("a")));
+    assertEquals(Filter.ReturnCode.SEEK_NEXT_USING_HINT, filter.filterKeyValue(null));
+    filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("b")));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("c")));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("d")));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("e")));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
   }
 
   @Test

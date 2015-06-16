@@ -56,7 +56,6 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.Utils.OutputFileUtils.OutputFilesFilter;
 import org.apache.hadoop.mapreduce.Job;
-import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.AfterClass;
@@ -67,7 +66,7 @@ import org.junit.experimental.categories.Category;
 @Category({VerySlowMapReduceTests.class, LargeTests.class})
 public class TestImportTsv implements Configurable {
 
-  protected static final Log LOG = LogFactory.getLog(TestImportTsv.class);
+  private static final Log LOG = LogFactory.getLog(TestImportTsv.class);
   protected static final String NAME = TestImportTsv.class.getSimpleName();
   protected static HBaseTestingUtility util = new HBaseTestingUtility();
 
@@ -223,12 +222,18 @@ public class TestImportTsv implements Configurable {
             "-D" + ImportTsv.BULK_OUTPUT_CONF_KEY + "=" + bulkOutputPath.toString(), table,
             INPUT_FILE
             };
-    GenericOptionsParser opts = new GenericOptionsParser(util.getConfiguration(), args);
-    args = opts.getRemainingArgs();
-    Job job = ImportTsv.createSubmittableJob(util.getConfiguration(), args);
-    assertTrue(job.getMapperClass().equals(TsvImporterTextMapper.class));
-    assertTrue(job.getReducerClass().equals(TextSortReducer.class));
-    assertTrue(job.getMapOutputValueClass().equals(Text.class));
+    assertEquals("running test job configuration failed.", 0, ToolRunner.run(
+        new Configuration(util.getConfiguration()),
+        new ImportTsv() {
+          @Override
+          public int run(String[] args) throws Exception {
+            Job job = createSubmittableJob(getConf(), args);
+            assertTrue(job.getMapperClass().equals(TsvImporterTextMapper.class));
+            assertTrue(job.getReducerClass().equals(TextSortReducer.class));
+            assertTrue(job.getMapOutputValueClass().equals(Text.class));
+            return 0;
+          }
+        }, args));
   }
 
   @Test

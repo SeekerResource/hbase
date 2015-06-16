@@ -70,6 +70,8 @@ message OpenRegionRequest {
   repeated RegionOpenInfo open_info = 1;
   // the intended server for this RPC.
   optional uint64 serverStartCode = 2;
+  // wall clock time from master
+  optional uint64 master_system_time = 5;
 
   message RegionOpenInfo {
     required RegionInfo region = 1;
@@ -88,6 +90,14 @@ message OpenRegionResponse {
     ALREADY_OPENED = 1;
     FAILED_OPENING = 2;
   }
+}
+
+message WarmupRegionRequest {
+
+    required RegionInfo regionInfo = 1;
+}
+
+message WarmupRegionResponse {
 }
 
 /**
@@ -252,6 +262,9 @@ service AdminService {
 
   rpc OpenRegion(OpenRegionRequest)
     returns(OpenRegionResponse);
+
+  rpc WarmupRegion(WarmupRegionRequest)
+    returns(WarmupRegionResponse);
 
   rpc CloseRegion(CloseRegionRequest)
     returns(CloseRegionResponse);

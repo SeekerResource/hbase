@@ -27,8 +27,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Matcher;
@@ -77,18 +75,19 @@ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.Reference;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
-import org.apache.hadoop.hbase.regionserver.HRegion.Operation;
+import org.apache.hadoop.hbase.regionserver.Region.Operation;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.util.BoundedConcurrentLinkedQueue;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CoprocessorClassLoader;
 import org.apache.hadoop.hbase.util.Pair;
 
 /**
  * Implements the coprocessor environment and runtime support for coprocessors
- * loaded within a {@link HRegion}.
+ * loaded within a {@link Region}.
  */
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.COPROC)
 @InterfaceStability.Evolving
@@ -101,17 +100,18 @@ public class RegionCoprocessorHost
       new ReferenceMap(AbstractReferenceMap.HARD, AbstractReferenceMap.WEAK);
 
   /**
+   * 
    * Encapsulation of the environment of each coprocessor
    */
   static class RegionEnvironment extends CoprocessorHost.Environment
       implements RegionCoprocessorEnvironment {
 
-    private HRegion region;
+    private Region region;
     private RegionServerServices rsServices;
     ConcurrentMap<String, Object> sharedData;
     private static final int LATENCY_BUFFER_SIZE = 100;
-    private final BlockingQueue<Long> coprocessorTimeNanos = new ArrayBlockingQueue<Long>(
-        LATENCY_BUFFER_SIZE);
+    private final BoundedConcurrentLinkedQueue<Long> coprocessorTimeNanos =
+        new BoundedConcurrentLinkedQueue<Long>(LATENCY_BUFFER_SIZE);
     private final boolean useLegacyPre;
     private final boolean useLegacyPost;
 
@@ -121,7 +121,7 @@ public class RegionCoprocessorHost
      * @param priority chaining priority
      */
     public RegionEnvironment(final Coprocessor impl, final int priority,
-        final int seq, final Configuration conf, final HRegion region,
+        final int seq, final Configuration conf, final Region region,
         final RegionServerServices services, final ConcurrentMap<String, Object> sharedData) {
       super(impl, priority, seq, conf);
       this.region = region;
@@ -139,7 +139,7 @@ public class RegionCoprocessorHost
 
     /** @return the region */
     @Override
-    public HRegion getRegion() {
+    public Region getRegion() {
       return region;
     }
 
@@ -209,7 +209,7 @@ public class RegionCoprocessorHost
   /** The region server services */
   RegionServerServices rsServices;
   /** The region */
-  HRegion region;
+  Region region;
 
   /**
    * Constructor
@@ -217,7 +217,7 @@ public class RegionCoprocessorHost
    * @param rsServices interface to available region server functionality
    * @param conf the configuration
    */
-  public RegionCoprocessorHost(final HRegion region,
+  public RegionCoprocessorHost(final Region region,
       final RegionServerServices rsServices, final Configuration conf) {
     super(rsServices);
     this.conf = conf;
@@ -258,8 +258,9 @@ public class RegionCoprocessorHost
                 key + ", spec: " + spec);
               continue;
             }
-            int priority = matcher.group(3).trim().isEmpty() ?
-                Coprocessor.PRIORITY_USER : Integer.valueOf(matcher.group(3));
+            String priorityStr = matcher.group(3).trim();
+            int priority = priorityStr.isEmpty() ?
+                Coprocessor.PRIORITY_USER : Integer.parseInt(priorityStr);
             String cfgSpec = null;
             try {
               cfgSpec = matcher.group(4);
@@ -706,7 +707,7 @@ public class RegionCoprocessorHost
    * @param r the new right-hand daughter region
    * @throws IOException
    */
-  public void postSplit(final HRegion l, final HRegion r) throws IOException {
+  public void postSplit(final Region l, final Region r) throws IOException {
     execOperation(coprocessors.isEmpty() ? null : new RegionOperation() {
       @Override
       public void call(RegionObserver oserver, ObserverContext<RegionCoprocessorEnvironment> ctx)
@@ -1362,20 +1363,18 @@ public class RegionCoprocessorHost
    * This will be called by the scan flow when the current scanned row is being filtered out by the
    * filter.
    * @param s the scanner
-   * @param currentRow The current rowkey which got filtered out
-   * @param offset offset to rowkey
-   * @param length length of rowkey
+   * @param curRowCell The cell in the current row which got filtered out
    * @return whether more rows are available for the scanner or not
    * @throws IOException
    */
-  public boolean postScannerFilterRow(final InternalScanner s, final byte[] currentRow,
-      final int offset, final short length) throws IOException {
+  public boolean postScannerFilterRow(final InternalScanner s, final Cell curRowCell)
+      throws IOException {
     return execOperationWithResult(true,
         coprocessors.isEmpty() ? null : new RegionOperationWithResult<Boolean>() {
       @Override
       public void call(RegionObserver oserver, ObserverContext<RegionCoprocessorEnvironment> ctx)
           throws IOException {
-        setResult(oserver.postScannerFilterRow(ctx, s, currentRow, offset,length, getResult()));
+        setResult(oserver.postScannerFilterRow(ctx, s, curRowCell, getResult()));
       }
     });
   }

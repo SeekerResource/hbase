@@ -377,8 +377,8 @@ public class ZKUtil {
    * @return ensemble key with a name (if any)
    */
   public static String getZooKeeperClusterKey(Configuration conf, String name) {
-    String ensemble = conf.get(HConstants.ZOOKEEPER_QUORUM.replaceAll(
-        "[\\t\\n\\x0B\\f\\r]", ""));
+    String ensemble = conf.get(HConstants.ZOOKEEPER_QUORUM).replaceAll(
+        "[\\t\\n\\x0B\\f\\r]", "");
     StringBuilder builder = new StringBuilder(ensemble);
     builder.append(":");
     builder.append(conf.get(HConstants.ZOOKEEPER_CLIENT_PORT));
@@ -660,7 +660,7 @@ public class ZKUtil {
       return node;
     }
     public boolean isEmpty() {
-      return (data.length == 0);
+      return (data == null || data.length == 0);
     }
   }
 
@@ -999,7 +999,11 @@ public class ZKUtil {
     try {
       javax.security.auth.login.Configuration testConfig =
           javax.security.auth.login.Configuration.getConfiguration();
-      if(testConfig.getAppConfigurationEntry("Client") == null) {
+      if (testConfig.getAppConfigurationEntry("Client") == null
+          && testConfig.getAppConfigurationEntry(
+            JaasConfiguration.CLIENT_KEYTAB_KERBEROS_CONFIG_NAME) == null
+          && testConfig.getAppConfigurationEntry(
+              JaasConfiguration.SERVER_KEYTAB_KERBEROS_CONFIG_NAME) == null) {
         return false;
       }
     } catch(Exception e) {
@@ -1008,15 +1012,19 @@ public class ZKUtil {
     }
 
     // Master & RSs uses hbase.zookeeper.client.*
-    return("kerberos".equalsIgnoreCase(conf.get("hbase.security.authentication")) &&
-         conf.get("hbase.zookeeper.client.keytab.file") != null);
+    return "kerberos".equalsIgnoreCase(conf.get("hbase.security.authentication"));
   }
 
   private static ArrayList<ACL> createACL(ZooKeeperWatcher zkw, String node) {
+    return createACL(zkw, node, isSecureZooKeeper(zkw.getConfiguration()));
+  }
+
+  public static ArrayList<ACL> createACL(ZooKeeperWatcher zkw, String node,
+    boolean isSecureZooKeeper) {
     if (!node.startsWith(zkw.baseZNode)) {
       return Ids.OPEN_ACL_UNSAFE;
     }
-    if (isSecureZooKeeper(zkw.getConfiguration())) {
+    if (isSecureZooKeeper) {
       String superUser = zkw.getConfiguration().get("hbase.superuser");
       ArrayList<ACL> acls = new ArrayList<ACL>();
       // add permission to hbase supper user
@@ -1025,13 +1033,7 @@ public class ZKUtil {
       }
       // Certain znodes are accessed directly by the client,
       // so they must be readable by non-authenticated clients
-      if ((node.equals(zkw.baseZNode) == true) ||
-          (zkw.isAnyMetaReplicaZnode(node)) ||
-          (node.equals(zkw.getMasterAddressZNode()) == true) ||
-          (node.equals(zkw.clusterIdZNode) == true) ||
-          (node.equals(zkw.rsZNode) == true) ||
-          (node.equals(zkw.backupMasterAddressesZNode) == true) ||
-          (node.startsWith(zkw.tableZNode) == true)) {
+      if (zkw.isClientReadable(node)) {
         acls.addAll(Ids.CREATOR_ALL_ACL);
         acls.addAll(Ids.READ_ACL_UNSAFE);
       } else {
@@ -1204,8 +1206,6 @@ public class ZKUtil {
    * @param data data of node to create
    * @param cb
    * @param ctx
-   * @throws KeeperException if unexpected zookeeper exception
-   * @throws KeeperException.NodeExistsException if node already exists
    */
   public static void asyncCreate(ZooKeeperWatcher zkw,
       String znode, byte [] data, final AsyncCallback.StringCallback cb,
@@ -2025,7 +2025,6 @@ public class ZKUtil {
   /**
    * Recursively print the current state of ZK (non-transactional)
    * @param root name of the root directory in zk to print
-   * @throws KeeperException
    */
   public static void logZKTree(ZooKeeperWatcher zkw, String root) {
     if (!LOG.isDebugEnabled()) return;

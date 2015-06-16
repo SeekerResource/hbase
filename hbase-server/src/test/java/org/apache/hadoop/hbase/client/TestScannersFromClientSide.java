@@ -24,8 +24,10 @@ import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.HTestConst;
@@ -68,6 +70,8 @@ public class TestScannersFromClientSide {
    */
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
+    Configuration conf = TEST_UTIL.getConfiguration();
+    conf.setLong(HConstants.HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE_KEY, 10 * 1024 * 1024);
     TEST_UTIL.startMiniCluster(3);
   }
 
@@ -168,6 +172,135 @@ public class TestScannersFromClientSide {
     result = scanner.next();
     verifyResult(result, kvListExp, toLog, "Testing second batch of scan");
 
+  }
+
+  @Test
+  public void testMaxResultSizeIsSetToDefault() throws Exception {
+    TableName TABLE = TableName.valueOf("testMaxResultSizeIsSetToDefault");
+    Table ht = TEST_UTIL.createTable(TABLE, FAMILY);
+
+    // The max result size we expect the scan to use by default.
+    long expectedMaxResultSize =
+        TEST_UTIL.getConfiguration().getLong(HConstants.HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE_KEY,
+          HConstants.DEFAULT_HBASE_CLIENT_SCANNER_MAX_RESULT_SIZE);
+
+    int numRows = 5;
+    byte[][] ROWS = HTestConst.makeNAscii(ROW, numRows);
+
+    int numQualifiers = 10;
+    byte[][] QUALIFIERS = HTestConst.makeNAscii(QUALIFIER, numQualifiers);
+
+    // Specify the cell size such that a single row will be larger than the default
+    // value of maxResultSize. This means that Scan RPCs should return at most a single
+    // result back to the client.
+    int cellSize = (int) (expectedMaxResultSize / (numQualifiers - 1));
+    byte[] cellValue = Bytes.createMaxByteArray(cellSize);
+
+    Put put;
+    List<Put> puts = new ArrayList<Put>();
+    for (int row = 0; row < ROWS.length; row++) {
+      put = new Put(ROWS[row]);
+      for (int qual = 0; qual < QUALIFIERS.length; qual++) {
+        KeyValue kv = new KeyValue(ROWS[row], FAMILY, QUALIFIERS[qual], cellValue);
+        put.add(kv);
+      }
+      puts.add(put);
+    }
+    ht.put(puts);
+
+    // Create a scan with the default configuration.
+    Scan scan = new Scan();
+
+    ResultScanner scanner = ht.getScanner(scan);
+    assertTrue(scanner instanceof ClientScanner);
+    ClientScanner clientScanner = (ClientScanner) scanner;
+
+    // Call next to issue a single RPC to the server
+    scanner.next();
+
+    // The scanner should have, at most, a single result in its cache. If there more results exists
+    // in the cache it means that more than the expected max result size was fetched.
+    assertTrue("The cache contains: " + clientScanner.getCacheSize() + " results",
+      clientScanner.getCacheSize() <= 1);
+  }
+
+  @Test
+  public void testSmallScan() throws Exception {
+    TableName TABLE = TableName.valueOf("testSmallScan");
+
+    int numRows = 10;
+    byte[][] ROWS = HTestConst.makeNAscii(ROW, numRows);
+
+    int numQualifiers = 10;
+    byte[][] QUALIFIERS = HTestConst.makeNAscii(QUALIFIER, numQualifiers);
+
+    Table ht = TEST_UTIL.createTable(TABLE, FAMILY);
+
+    Put put;
+    List<Put> puts = new ArrayList<Put>();
+    for (int row = 0; row < ROWS.length; row++) {
+      put = new Put(ROWS[row]);
+      for (int qual = 0; qual < QUALIFIERS.length; qual++) {
+        KeyValue kv = new KeyValue(ROWS[row], FAMILY, QUALIFIERS[qual], VALUE);
+        put.add(kv);
+      }
+      puts.add(put);
+    }
+    ht.put(puts);
+
+    int expectedRows = numRows;
+    int expectedCols = numRows * numQualifiers;
+
+    // Test normal and reversed
+    testSmallScan(ht, true, expectedRows, expectedCols);
+    testSmallScan(ht, false, expectedRows, expectedCols);
+  }
+
+  /**
+   * Run through a variety of test configurations with a small scan
+   * @param table
+   * @param reversed
+   * @param rows
+   * @param columns
+   * @throws Exception
+   */
+  public void testSmallScan(Table table, boolean reversed, int rows, int columns) throws Exception {
+    Scan baseScan = new Scan();
+    baseScan.setReversed(reversed);
+    baseScan.setSmall(true);
+
+    Scan scan = new Scan(baseScan);
+    verifyExpectedCounts(table, scan, rows, columns);
+
+    scan = new Scan(baseScan);
+    scan.setMaxResultSize(1);
+    verifyExpectedCounts(table, scan, rows, columns);
+
+    scan = new Scan(baseScan);
+    scan.setMaxResultSize(1);
+    scan.setCaching(Integer.MAX_VALUE);
+    verifyExpectedCounts(table, scan, rows, columns);
+  }
+
+  private void verifyExpectedCounts(Table table, Scan scan, int expectedRowCount,
+      int expectedCellCount) throws Exception {
+    ResultScanner scanner = table.getScanner(scan);
+    
+    int rowCount = 0;
+    int cellCount = 0;
+    Result r = null;
+    while ((r = scanner.next()) != null) {
+      rowCount++;
+      for (Cell c : r.rawCells()) {
+        cellCount++;
+      }
+    }
+
+    assertTrue("Expected row count: " + expectedRowCount + " Actual row count: " + rowCount,
+      expectedRowCount == rowCount);
+    assertTrue("Expected cell count: " + expectedCellCount + " Actual cell count: " + cellCount,
+      expectedCellCount == cellCount);
+    scanner.close();
   }
 
   /**
@@ -507,6 +640,55 @@ public class TestScannersFromClientSide {
     kvListExp.add(new KeyValue(ROW, FAMILY, QUALIFIERS[1], 1, VALUE));
     result = scanner.next();
     verifyResult(result, kvListExp, toLog, "Testing scan on re-opened region");
+  }
+
+  /**
+   * Test from client side for async scan
+   *
+   * @throws Exception
+   */
+  @Test
+  public void testAsyncScanner() throws Exception {
+    byte [] TABLE = Bytes.toBytes("testAsyncScan");
+    byte [][] ROWS = HTestConst.makeNAscii(ROW, 2);
+    byte [][] FAMILIES = HTestConst.makeNAscii(FAMILY, 3);
+    byte [][] QUALIFIERS = HTestConst.makeNAscii(QUALIFIER, 10);
+
+    HTable ht = TEST_UTIL.createTable(TABLE, FAMILIES);
+
+    Put put;
+    Scan scan;
+    Result result;
+    boolean toLog = true;
+    List<Cell> kvListExp, kvListScan;
+
+    kvListExp = new ArrayList<Cell>();
+
+    for (int r=0; r < ROWS.length; r++) {
+      put = new Put(ROWS[r]);
+      for (int c=0; c < FAMILIES.length; c++) {
+        for (int q=0; q < QUALIFIERS.length; q++) {
+          KeyValue kv = new KeyValue(ROWS[r], FAMILIES[c], QUALIFIERS[q], 1, VALUE);
+          put.add(kv);
+          kvListExp.add(kv);
+        }
+      }
+      ht.put(put);
+    }
+
+    scan = new Scan();
+    scan.setAsyncPrefetch(true);
+    ResultScanner scanner = ht.getScanner(scan);
+    kvListScan = new ArrayList<Cell>();
+    while ((result = scanner.next()) != null) {
+      for (Cell kv : result.listCells()) {
+        kvListScan.add(kv);
+      }
+    }
+    result = Result.create(kvListScan);
+    assertTrue("Not instance of async scanner",scanner instanceof ClientAsyncPrefetchScanner);
+    verifyResult(result, kvListExp, toLog, "Testing async scan");
+
   }
 
   static void verifyResult(Result result, List<Cell> expKvList, boolean toLog,

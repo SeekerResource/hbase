@@ -35,6 +35,7 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -44,7 +45,6 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.compress.Compression;
-import org.apache.hadoop.hbase.regionserver.InternalScanner.NextState;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -107,7 +107,7 @@ public class TestSeekOptimizations {
   private static final int[] MAX_VERSIONS_VALUES = new int[] { 1, 2 };
 
   // Instance variables
-  private HRegion region;
+  private Region region;
   private Put put;
   private Delete del;
   private Random rand;
@@ -225,7 +225,7 @@ public class TestSeekOptimizations {
     // result, not to the one already returned in results.
     boolean hasNext;
     do {
-      hasNext = NextState.hasMoreValues(scanner.next(results));
+      hasNext = scanner.next(results);
       actualKVs.addAll(results);
       results.clear();
     } while (hasNext);
@@ -304,7 +304,7 @@ public class TestSeekOptimizations {
       }
     }
     expectedKVs = filteredKVs;
-    Collections.sort(expectedKVs, KeyValue.COMPARATOR);
+    Collections.sort(expectedKVs, CellComparator.COMPARATOR);
   }
 
   public void put(String qual, long ts) {
@@ -434,7 +434,7 @@ public class TestSeekOptimizations {
       }
     }
 
-    region.flushcache();
+    region.flush(true);
   }
 
   @After
@@ -459,7 +459,7 @@ public class TestSeekOptimizations {
 
     int i;
     for (i = 0; i < minLen
-        && KeyValue.COMPARATOR.compareOnlyKeyPortion(expected.get(i), actual.get(i)) == 0;
+        && CellComparator.COMPARATOR.compareKeyIgnoresMvcc(expected.get(i), actual.get(i)) == 0;
         ++i) {}
 
     if (additionalMsg == null) {

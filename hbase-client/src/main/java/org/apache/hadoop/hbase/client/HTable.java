@@ -71,6 +71,7 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableDescripto
 import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.GetTableDescriptorsResponse;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.hbase.util.Threads;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -116,6 +117,7 @@ public class HTable implements HTableInterface {
   private boolean autoFlush = true;
   private boolean closed = false;
   protected int scannerCaching;
+  protected long scannerMaxResultSize;
   private ExecutorService pool;  // For Multi & Scan
   private int operationTimeout;
   private final boolean cleanupPoolOnClose; // shutdown the pool in close()
@@ -127,78 +129,6 @@ public class HTable implements HTableInterface {
   protected AsyncProcess multiAp;
   private RpcRetryingCallerFactory rpcCallerFactory;
   private RpcControllerFactory rpcControllerFactory;
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param conf Configuration object to use.
-   * @param tableName Name of the table.
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Constructing HTable objects manually has been deprecated. Please use
-   * {@link Connection} to instantiate a {@link Table} instead.
-   */
-  @Deprecated
-  public HTable(Configuration conf, final String tableName)
-  throws IOException {
-    this(conf, TableName.valueOf(tableName));
-  }
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param conf Configuration object to use.
-   * @param tableName Name of the table.
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Constructing HTable objects manually has been deprecated. Please use
-   * {@link Connection} to instantiate a {@link Table} instead.
-   */
-  @Deprecated
-  public HTable(Configuration conf, final byte[] tableName)
-  throws IOException {
-    this(conf, TableName.valueOf(tableName));
-  }
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param conf Configuration object to use.
-   * @param tableName table name pojo
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Constructing HTable objects manually has been deprecated. Please use
-   * {@link Connection} to instantiate a {@link Table} instead.
-   */
-  @Deprecated
-  public HTable(Configuration conf, final TableName tableName)
-  throws IOException {
-    this.tableName = tableName;
-    this.cleanupPoolOnClose = true;
-    this.cleanupConnectionOnClose = true;
-    if (conf == null) {
-      this.connection = null;
-      return;
-    }
-    this.connection = (ClusterConnection) ConnectionFactory.createConnection(conf);
-    this.configuration = conf;
-
-    this.pool = getDefaultExecutor(conf);
-    this.finishSetup();
-  }
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param tableName Name of the table.
-   * @param connection HConnection to be used.
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Do not use.
-   */
-  @Deprecated
-  public HTable(TableName tableName, Connection connection) throws IOException {
-    this.tableName = tableName;
-    this.cleanupPoolOnClose = true;
-    this.cleanupConnectionOnClose = false;
-    this.connection = (ClusterConnection)connection;
-    this.configuration = connection.getConfiguration();
-
-    this.pool = getDefaultExecutor(this.configuration);
-    this.finishSetup();
-  }
 
   // Marked Private @since 1.0
   @InterfaceAudience.Private
@@ -221,68 +151,6 @@ public class HTable implements HTableInterface {
 
   /**
    * Creates an object to access a HBase table.
-   * @param conf Configuration object to use.
-   * @param tableName Name of the table.
-   * @param pool ExecutorService to be used.
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Constructing HTable objects manually has been deprecated. Please use
-   * {@link Connection} to instantiate a {@link Table} instead.
-   */
-  @Deprecated
-  public HTable(Configuration conf, final byte[] tableName, final ExecutorService pool)
-      throws IOException {
-    this(conf, TableName.valueOf(tableName), pool);
-  }
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param conf Configuration object to use.
-   * @param tableName Name of the table.
-   * @param pool ExecutorService to be used.
-   * @throws IOException if a remote or network exception occurs
-   * @deprecated Constructing HTable objects manually has been deprecated. Please use
-   * {@link Connection} to instantiate a {@link Table} instead.
-   */
-  @Deprecated
-  public HTable(Configuration conf, final TableName tableName, final ExecutorService pool)
-      throws IOException {
-    this.connection = (ClusterConnection) ConnectionFactory.createConnection(conf);
-    this.configuration = conf;
-    this.pool = pool;
-    if (pool == null) {
-      this.pool = getDefaultExecutor(conf);
-      this.cleanupPoolOnClose = true;
-    } else {
-      this.cleanupPoolOnClose = false;
-    }
-    this.tableName = tableName;
-    this.cleanupConnectionOnClose = true;
-    this.finishSetup();
-  }
-
-  /**
-   * Creates an object to access a HBase table.
-   * @param tableName Name of the table.
-   * @param connection HConnection to be used.
-   * @param pool ExecutorService to be used.
-   * @throws IOException if a remote or network exception occurs.
-   * @deprecated Do not use, internal ctor.
-   */
-  @Deprecated
-  public HTable(final byte[] tableName, final Connection connection,
-      final ExecutorService pool) throws IOException {
-    this(TableName.valueOf(tableName), connection, pool);
-  }
-
-  /** @deprecated Do not use, internal ctor. */
-  @Deprecated
-  public HTable(TableName tableName, final Connection connection,
-      final ExecutorService pool) throws IOException {
-    this(tableName, (ClusterConnection)connection, null, null, null, pool);
-  }
-
-  /**
-   * Creates an object to access a HBase table.
    * Used by HBase internally.  DO NOT USE. See {@link ConnectionFactory} class comment for how to
    * get a {@link Table} instance (use {@link Table} instead of {@link HTable}).
    * @param tableName Name of the table.
@@ -291,7 +159,7 @@ public class HTable implements HTableInterface {
    * @throws IOException if a remote or network exception occurs
    */
   @InterfaceAudience.Private
-  public HTable(TableName tableName, final ClusterConnection connection,
+  protected HTable(TableName tableName, final ClusterConnection connection,
       final TableConfiguration tableConfig,
       final RpcRetryingCallerFactory rpcCallerFactory,
       final RpcControllerFactory rpcControllerFactory,
@@ -351,7 +219,7 @@ public class HTable implements HTableInterface {
     this.operationTimeout = tableName.isSystemTable() ?
         tableConfiguration.getMetaOperationTimeout() : tableConfiguration.getOperationTimeout();
     this.scannerCaching = tableConfiguration.getScannerCaching();
-
+    this.scannerMaxResultSize = tableConfiguration.getScannerMaxResultSize();
     if (this.rpcCallerFactory == null) {
       this.rpcCallerFactory = connection.getNewRpcRetryingCallerFactory(configuration);
     }
@@ -453,12 +321,9 @@ public class HTable implements HTableInterface {
   @Deprecated
   public static boolean isTableEnabled(Configuration conf,
       final TableName tableName) throws IOException {
-    return HConnectionManager.execute(new HConnectable<Boolean>(conf) {
-      @Override
-      public Boolean connect(HConnection connection) throws IOException {
-        return connection.isTableEnabled(tableName);
-      }
-    });
+    try(Connection conn = ConnectionFactory.createConnection(conf)) {
+      return conn.getAdmin().isTableEnabled(tableName);
+    }
   }
 
   /**
@@ -519,39 +384,12 @@ public class HTable implements HTableInterface {
   }
 
   /**
-   * Gets the number of rows that a scanner will fetch at once.
-   * <p>
-   * The default value comes from {@code hbase.client.scanner.caching}.
-   * @deprecated Use {@link Scan#setCaching(int)} and {@link Scan#getCaching()}
-   */
-  @Deprecated
-  public int getScannerCaching() {
-    return scannerCaching;
-  }
-
-  /**
    * Kept in 0.96 for backward compatibility
    * @deprecated  since 0.96. This is an internal buffer that should not be read nor write.
    */
   @Deprecated
   public List<Row> getWriteBuffer() {
     return mutator == null ? null : mutator.getWriteBuffer();
-  }
-
-  /**
-   * Sets the number of rows that a scanner will fetch at once.
-   * <p>
-   * This will override the value specified by
-   * {@code hbase.client.scanner.caching}.
-   * Increasing this value will reduce the amount of work needed each time
-   * {@code next()} is called on a scanner, at the expense of memory use
-   * (since more rows will need to be maintained in memory by the scanners).
-   * @param scannerCaching the number of rows a scanner will fetch at once.
-   * @deprecated Use {@link Scan#setCaching(int)}
-   */
-  @Deprecated
-  public void setScannerCaching(int scannerCaching) {
-    this.scannerCaching = scannerCaching;
   }
 
   /**
@@ -776,8 +614,17 @@ public class HTable implements HTableInterface {
     if (scan.getBatch() > 0 && scan.isSmall()) {
       throw new IllegalArgumentException("Small scan should not be used with batching");
     }
+
     if (scan.getCaching() <= 0) {
-      scan.setCaching(getScannerCaching());
+      scan.setCaching(scannerCaching);
+    }
+    if (scan.getMaxResultSize() <= 0) {
+      scan.setMaxResultSize(scannerMaxResultSize);
+    }
+
+    Boolean async = scan.isAsyncPrefetch();
+    if (async == null) {
+      async = tableConfiguration.isClientScannerAsyncPrefetch();
     }
 
     if (scan.isReversed()) {
@@ -797,9 +644,15 @@ public class HTable implements HTableInterface {
           this.connection, this.rpcCallerFactory, this.rpcControllerFactory,
           pool, tableConfiguration.getReplicaCallTimeoutMicroSecondScan());
     } else {
-      return new ClientScanner(getConfiguration(), scan, getName(), this.connection,
-          this.rpcCallerFactory, this.rpcControllerFactory,
-          pool, tableConfiguration.getReplicaCallTimeoutMicroSecondScan());
+      if (async) {
+        return new ClientAsyncPrefetchScanner(getConfiguration(), scan, getName(), this.connection,
+            this.rpcCallerFactory, this.rpcControllerFactory,
+            pool, tableConfiguration.getReplicaCallTimeoutMicroSecondScan());
+      } else {
+        return new ClientSimpleScanner(getConfiguration(), scan, getName(), this.connection,
+            this.rpcCallerFactory, this.rpcControllerFactory,
+            pool, tableConfiguration.getReplicaCallTimeoutMicroSecondScan());
+      }
     }
   }
 
@@ -831,18 +684,28 @@ public class HTable implements HTableInterface {
    */
   @Override
   public Result get(final Get get) throws IOException {
-    if (get.getConsistency() == null){
-      get.setConsistency(defaultConsistency);
+    return get(get, get.isCheckExistenceOnly());
+  }
+
+  private Result get(Get get, final boolean checkExistenceOnly) throws IOException {
+    // if we are changing settings to the get, clone it.
+    if (get.isCheckExistenceOnly() != checkExistenceOnly || get.getConsistency() == null) {
+      get = ReflectionUtils.newInstance(get.getClass(), get);
+      get.setCheckExistenceOnly(checkExistenceOnly);
+      if (get.getConsistency() == null){
+        get.setConsistency(defaultConsistency);
+      }
     }
 
     if (get.getConsistency() == Consistency.STRONG) {
       // Good old call.
+      final Get getReq = get;
       RegionServerCallable<Result> callable = new RegionServerCallable<Result>(this.connection,
           getName(), get.getRow()) {
         @Override
         public Result call(int callTimeout) throws IOException {
           ClientProtos.GetRequest request =
-              RequestConverter.buildGetRequest(getLocation().getRegionInfo().getRegionName(), get);
+            RequestConverter.buildGetRequest(getLocation().getRegionInfo().getRegionName(), getReq);
           PayloadCarryingRpcController controller = rpcControllerFactory.newController();
           controller.setPriority(tableName);
           controller.setCallTimeout(callTimeout);
@@ -1133,18 +996,6 @@ public class HTable implements HTableInterface {
   }
 
   /**
-   * @deprecated Use {@link #incrementColumnValue(byte[], byte[], byte[], long, Durability)}
-   */
-  @Deprecated
-  @Override
-  public long incrementColumnValue(final byte [] row, final byte [] family,
-      final byte [] qualifier, final long amount, final boolean writeToWAL)
-  throws IOException {
-    return incrementColumnValue(row, family, qualifier, amount,
-      writeToWAL? Durability.SKIP_WAL: Durability.USE_DEFAULT);
-  }
-
-  /**
    * {@inheritDoc}
    */
   @Override
@@ -1350,8 +1201,7 @@ public class HTable implements HTableInterface {
    */
   @Override
   public boolean exists(final Get get) throws IOException {
-    get.setCheckExistenceOnly(true);
-    Result r = get(get);
+    Result r = get(get, true);
     assert r.getExists() != null;
     return r.getExists();
   }
@@ -1364,13 +1214,16 @@ public class HTable implements HTableInterface {
     if (gets.isEmpty()) return new boolean[]{};
     if (gets.size() == 1) return new boolean[]{exists(gets.get(0))};
 
+    ArrayList<Get> exists = new ArrayList<Get>(gets.size());
     for (Get g: gets){
-      g.setCheckExistenceOnly(true);
+      Get ge = new Get(g);
+      ge.setCheckExistenceOnly(true);
+      exists.add(ge);
     }
 
     Object[] r1;
     try {
-      r1 = batch(gets);
+      r1 = batch(exists);
     } catch (InterruptedException e) {
       throw (InterruptedIOException)new InterruptedIOException().initCause(e);
     }
@@ -1796,6 +1649,12 @@ public class HTable implements HTableInterface {
       byte[] startKey, byte[] endKey, final R responsePrototype, final Callback<R> callback)
       throws ServiceException, Throwable {
 
+    if (startKey == null) {
+      startKey = HConstants.EMPTY_START_ROW;
+    }
+    if (endKey == null) {
+      endKey = HConstants.EMPTY_END_ROW;
+    }
     // get regions covered by the row range
     Pair<List<byte[]>, List<HRegionLocation>> keysAndRegions =
         getKeysAndRegionsInRange(startKey, endKey, true);
